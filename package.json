@@ -1,0 +1,24 @@
+{
+    "name": "media-library-source-worker",
+    "version": "1.0.0",
+    "description": "Source provider for media library worker",
+    "license": "ISC",
+    "author": "Anuv Gupta",
+    "keywords": [],
+    "main": "src/main.js",
+    "scripts": {
+        "start": "node src/main.js",
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "dependencies": {
+        "aws-sdk": "^2.1692.0"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/anuvgupta/media-library-source-worker.git"
+    },
+    "bugs": {
+        "url": "https://github.com/anuvgupta/media-library-source-worker/issues"
+    },
+    "homepage": "https://github.com/anuvgupta/media-library-source-worker#readme"
+}
