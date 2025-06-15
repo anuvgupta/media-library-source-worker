@@ -1,6 +1,7 @@
 const AWS = require("aws-sdk");
 const fs = require("fs");
 const path = require("path");
+const { spawn } = require("child_process");
 const { promisify } = require("util");
 
 const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME;
@@ -17,182 +18,385 @@ const s3 = new AWS.S3({
     secretAccessKey: AWS_SECRET_ACCESS_KEY,
 });
 
-class MP4ChunkedUploader {
+class MP4HLSUploader {
     constructor(options = {}) {
         this.bucketName = options.bucketName || "example-bucket";
-        this.chunkSizeBytes = options.chunkSizeBytes || 10 * 1024 * 1024; // 10MB chunks
+        this.segmentDuration = options.segmentDuration || 10; // 10 second segments
         this.concurrentUploads = options.concurrentUploads || 3;
-        this.priorityChunks = options.priorityChunks || 5; // Upload first N chunks immediately
+        this.prioritySegments = options.prioritySegments || 5; // Upload first N segments immediately
+        this.tempDir = options.tempDir || "./temp";
+
+        // Ensure temp directory exists
+        if (!fs.existsSync(this.tempDir)) {
+            fs.mkdirSync(this.tempDir, { recursive: true });
+        }
     }
 
     async uploadMovie(filePath, movieId) {
         try {
-            console.log(`Starting upload for movie: ${movieId}`);
+            console.log(
+                `Starting HLS conversion and upload for movie: ${movieId}`
+            );
             console.log(`File: ${filePath}`);
 
             const fileStats = fs.statSync(filePath);
             const totalSize = fileStats.size;
-            const totalChunks = Math.ceil(totalSize / this.chunkSizeBytes);
-
             console.log(
                 `Total size: ${(totalSize / 1024 / 1024).toFixed(2)} MB`
-            );
-            console.log(`Total chunks: ${totalChunks}`);
-            console.log(
-                `Chunk size: ${(this.chunkSizeBytes / 1024 / 1024).toFixed(
-                    2
-                )} MB`
             );
 
             // Create upload session
             const uploadSession = {
                 movieId,
-                totalChunks,
-                uploadedChunks: 0,
+                totalSegments: 0,
+                uploadedSegments: 0,
                 totalSize,
                 startTime: Date.now(),
-                status: "uploading",
+                status: "converting",
             };
 
-            // Upload priority chunks first (for immediate playback)
-            await this.uploadPriorityChunks(filePath, movieId, uploadSession);
+            // Step 1: Convert to HLS segments
+            const segmentInfo = await this.convertToHLS(filePath, movieId);
+            uploadSession.totalSegments = segmentInfo.totalSegments;
 
-            // Continue uploading remaining chunks
-            await this.uploadRemainingChunks(filePath, movieId, uploadSession);
+            console.log(`Total segments: ${segmentInfo.totalSegments}`);
+            console.log(`Segment duration: ${this.segmentDuration}s`);
+
+            // Step 2: Upload priority segments first
+            await this.uploadPrioritySegments(
+                movieId,
+                uploadSession,
+                segmentInfo
+            );
+
+            // Step 3: Upload remaining segments
+            await this.uploadRemainingSegments(
+                movieId,
+                uploadSession,
+                segmentInfo
+            );
+
+            // Step 4: Upload master playlist
+            await this.uploadMasterPlaylist(movieId, segmentInfo);
+
+            // Cleanup temp files
+            await this.cleanup(movieId);
 
             console.log(`✅ Upload completed for movie: ${movieId}`);
             return uploadSession;
         } catch (error) {
             console.error(`❌ Upload failed for movie: ${movieId}`, error);
+            await this.cleanup(movieId);
             throw error;
         }
     }
 
-    async uploadPriorityChunks(filePath, movieId, uploadSession) {
-        console.log(
-            `🚀 Uploading priority chunks (first ${this.priorityChunks})...`
-        );
+    async convertToHLS(filePath, movieId) {
+        console.log(`🔄 Converting to HLS segments...`);
 
-        const priorityPromises = [];
-        for (
-            let i = 0;
-            i < Math.min(this.priorityChunks, uploadSession.totalChunks);
-            i++
-        ) {
-            priorityPromises.push(
-                this.uploadChunk(filePath, movieId, i, uploadSession)
-            );
+        const outputDir = path.join(this.tempDir, movieId);
+        if (!fs.existsSync(outputDir)) {
+            fs.mkdirSync(outputDir, { recursive: true });
         }
 
-        await Promise.all(priorityPromises);
-        console.log(`✅ Priority chunks uploaded. Ready for playback!`);
+        const playlistPath = path.join(outputDir, "playlist.m3u8");
+        const segmentPattern = path.join(outputDir, "segment_%06d.ts");
 
-        // Update status to indicate ready for streaming
+        return new Promise((resolve, reject) => {
+            const ffmpegArgs = [
+                "-i",
+                filePath,
+                "-c:v",
+                "libx264", // Video codec
+                "-c:a",
+                "aac", // Audio codec
+                "-preset",
+                "fast", // Encoding speed
+                "-crf",
+                "23", // Quality (lower = better)
+                "-sc_threshold",
+                "0", // Disable scene change detection
+                "-g",
+                "48", // GOP size (keyframe interval)
+                "-keyint_min",
+                "48", // Minimum keyframe interval
+                "-hls_time",
+                this.segmentDuration.toString(), // Segment duration
+                "-hls_playlist_type",
+                "vod", // Video on demand
+                "-hls_segment_filename",
+                segmentPattern,
+                "-f",
+                "hls",
+                playlistPath,
+            ];
+
+            console.log(`Running FFmpeg: ffmpeg ${ffmpegArgs.join(" ")}`);
+
+            const ffmpeg = spawn("ffmpeg", ffmpegArgs);
+            let stderr = "";
+
+            ffmpeg.stderr.on("data", (data) => {
+                stderr += data.toString();
+                // Parse progress from FFmpeg output
+                const progressMatch = stderr.match(
+                    /time=(\d{2}):(\d{2}):(\d{2})/
+                );
+                if (progressMatch) {
+                    const hours = parseInt(progressMatch[1]);
+                    const minutes = parseInt(progressMatch[2]);
+                    const seconds = parseInt(progressMatch[3]);
+                    const currentTime = hours * 3600 + minutes * 60 + seconds;
+                    process.stdout.write(
+                        `\r🔄 Converting... ${Math.floor(currentTime / 60)}:${(
+                            currentTime % 60
+                        )
+                            .toString()
+                            .padStart(2, "0")}`
+                    );
+                }
+            });
+
+            ffmpeg.on("close", (code) => {
+                console.log(""); // New line after progress
+
+                if (code !== 0) {
+                    console.error("FFmpeg stderr:", stderr);
+                    reject(new Error(`FFmpeg failed with code ${code}`));
+                    return;
+                }
+
+                try {
+                    // Count generated segments
+                    const files = fs.readdirSync(outputDir);
+                    const segmentFiles = files.filter(
+                        (f) => f.startsWith("segment_") && f.endsWith(".ts")
+                    );
+                    const totalSegments = segmentFiles.length;
+
+                    console.log(
+                        `✅ Conversion completed. Generated ${totalSegments} segments`
+                    );
+
+                    resolve({
+                        totalSegments,
+                        outputDir,
+                        playlistPath,
+                        segmentFiles: segmentFiles.sort(),
+                    });
+                } catch (error) {
+                    reject(error);
+                }
+            });
+
+            ffmpeg.on("error", (error) => {
+                reject(new Error(`FFmpeg spawn error: ${error.message}`));
+            });
+        });
+    }
+
+    async uploadPrioritySegments(movieId, uploadSession, segmentInfo) {
+        console.log(
+            `🚀 Uploading priority segments (first ${this.prioritySegments})...`
+        );
+
+        const priorityFiles = segmentInfo.segmentFiles.slice(
+            0,
+            Math.min(this.prioritySegments, segmentInfo.totalSegments)
+        );
+
+        const priorityPromises = priorityFiles.map((filename, index) =>
+            this.uploadSegment(
+                movieId,
+                filename,
+                index,
+                uploadSession,
+                segmentInfo.outputDir
+            )
+        );
+
+        await Promise.all(priorityPromises);
+
+        // Upload initial playlist for priority segments
+        await this.uploadPartialPlaylist(
+            movieId,
+            priorityFiles.length,
+            segmentInfo
+        );
+
+        console.log(`✅ Priority segments uploaded. Ready for playback!`);
+
         uploadSession.status = "ready_for_playback";
         await this.updateUploadStatus(movieId, uploadSession);
     }
 
-    async uploadRemainingChunks(filePath, movieId, uploadSession) {
-        console.log(`📤 Uploading remaining chunks...`);
+    async uploadRemainingSegments(movieId, uploadSession, segmentInfo) {
+        console.log(`📤 Uploading remaining segments...`);
 
-        const remainingChunks = [];
-        for (let i = this.priorityChunks; i < uploadSession.totalChunks; i++) {
-            remainingChunks.push(i);
-        }
+        const remainingFiles = segmentInfo.segmentFiles.slice(
+            this.prioritySegments
+        );
 
-        // Upload remaining chunks with concurrency control
-        await this.uploadChunksWithConcurrency(
-            filePath,
+        // Upload remaining segments with concurrency control
+        await this.uploadSegmentsWithConcurrency(
             movieId,
-            remainingChunks,
-            uploadSession
+            remainingFiles,
+            this.prioritySegments,
+            uploadSession,
+            segmentInfo.outputDir
         );
 
         uploadSession.status = "completed";
         await this.updateUploadStatus(movieId, uploadSession);
     }
 
-    async uploadChunksWithConcurrency(
-        filePath,
+    async uploadSegmentsWithConcurrency(
         movieId,
-        chunkIndices,
-        uploadSession
+        segmentFiles,
+        startIndex,
+        uploadSession,
+        outputDir
     ) {
         const batches = [];
-        for (let i = 0; i < chunkIndices.length; i += this.concurrentUploads) {
-            batches.push(chunkIndices.slice(i, i + this.concurrentUploads));
+        for (let i = 0; i < segmentFiles.length; i += this.concurrentUploads) {
+            batches.push(segmentFiles.slice(i, i + this.concurrentUploads));
         }
 
-        for (const batch of batches) {
-            const batchPromises = batch.map((chunkIndex) =>
-                this.uploadChunk(filePath, movieId, chunkIndex, uploadSession)
-            );
+        for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+            const batch = batches[batchIndex];
+            const batchPromises = batch.map((filename, batchPos) => {
+                const segmentIndex =
+                    startIndex + batchIndex * this.concurrentUploads + batchPos;
+                return this.uploadSegment(
+                    movieId,
+                    filename,
+                    segmentIndex,
+                    uploadSession,
+                    outputDir
+                );
+            });
             await Promise.all(batchPromises);
+
+            // Update playlist after each batch
+            const uploadedCount = Math.min(
+                this.prioritySegments +
+                    (batchIndex + 1) * this.concurrentUploads,
+                uploadSession.totalSegments
+            );
+            await this.uploadPartialPlaylist(movieId, uploadedCount, {
+                segmentFiles: segmentFiles,
+            });
         }
     }
 
-    async uploadChunk(filePath, movieId, chunkIndex, uploadSession) {
-        const startByte = chunkIndex * this.chunkSizeBytes;
-        const endByte = Math.min(
-            startByte + this.chunkSizeBytes - 1,
-            uploadSession.totalSize - 1
-        );
-        const chunkSize = endByte - startByte + 1;
-
+    async uploadSegment(
+        movieId,
+        filename,
+        segmentIndex,
+        uploadSession,
+        outputDir
+    ) {
         try {
-            // Read chunk from file
-            const buffer = Buffer.alloc(chunkSize);
-            const fileHandle = fs.openSync(filePath, "r");
-            fs.readSync(fileHandle, buffer, 0, chunkSize, startByte);
-            fs.closeSync(fileHandle);
+            const segmentPath = path.join(outputDir, filename);
+            const segmentBuffer = fs.readFileSync(segmentPath);
 
-            // Upload to S3
-            const chunkFileId = chunkIndex.toString().padStart(6, "0");
-            const key = `cache/movies/${movieId}/chunks/chunk_${chunkFileId}.mp4`;
+            const key = `${S3_UPLOAD_PATH}/${movieId}/segments/${filename}`;
 
             const uploadParams = {
                 Bucket: this.bucketName,
                 Key: key,
-                Body: buffer,
-                ContentType: "video/mp4",
+                Body: segmentBuffer,
+                ContentType: "video/mp2t", // MPEG-2 Transport Stream
                 Metadata: {
                     movieId: movieId,
-                    chunkIndex: chunkIndex.toString(),
-                    totalChunks: uploadSession.totalChunks.toString(),
-                    startByte: startByte.toString(),
-                    endByte: endByte.toString(),
+                    segmentIndex: segmentIndex.toString(),
+                    totalSegments: uploadSession.totalSegments.toString(),
                 },
             };
 
             await s3.upload(uploadParams).promise();
 
-            uploadSession.uploadedChunks++;
+            uploadSession.uploadedSegments++;
             const progress = (
-                (uploadSession.uploadedChunks / uploadSession.totalChunks) *
+                (uploadSession.uploadedSegments / uploadSession.totalSegments) *
                 100
             ).toFixed(1);
 
             console.log(
-                `📦 Chunk ${chunkIndex + 1}/${
-                    uploadSession.totalChunks
+                `📦 Segment ${segmentIndex + 1}/${
+                    uploadSession.totalSegments
                 } uploaded (${progress}%)`
             );
 
             // Update progress periodically
-            if (uploadSession.uploadedChunks % 5 === 0) {
+            if (uploadSession.uploadedSegments % 3 === 0) {
                 await this.updateUploadStatus(movieId, uploadSession);
             }
         } catch (error) {
-            console.error(`❌ Failed to upload chunk ${chunkIndex}:`, error);
+            console.error(`❌ Failed to upload segment ${filename}:`, error);
             throw error;
         }
     }
 
+    async uploadPartialPlaylist(movieId, segmentCount, segmentInfo) {
+        // Generate HLS playlist for available segments
+        let playlist = "#EXTM3U\n";
+        playlist += "#EXT-X-VERSION:3\n";
+        playlist += `#EXT-X-TARGETDURATION:${this.segmentDuration}\n`;
+        playlist += "#EXT-X-MEDIA-SEQUENCE:0\n";
+
+        // Add segments that are available
+        for (let i = 0; i < segmentCount; i++) {
+            const filename = segmentInfo.segmentFiles[i];
+            playlist += `#EXTINF:${this.segmentDuration}.0,\n`;
+            playlist += `https://${WEBSITE_DOMAIN}/${S3_UPLOAD_PATH}/${movieId}/segments/${filename}\n`;
+        }
+
+        // Only add end tag if all segments are uploaded
+        if (segmentCount >= segmentInfo.totalSegments) {
+            playlist += "#EXT-X-ENDLIST\n";
+        }
+
+        const playlistParams = {
+            Bucket: this.bucketName,
+            Key: `${S3_UPLOAD_PATH}/${movieId}/playlist.m3u8`,
+            Body: playlist,
+            ContentType: "application/vnd.apple.mpegurl",
+        };
+
+        await s3.upload(playlistParams).promise();
+        console.log(`📝 Playlist updated (${segmentCount} segments available)`);
+    }
+
+    async uploadMasterPlaylist(movieId, segmentInfo) {
+        // Generate final HLS playlist
+        let playlist = "#EXTM3U\n";
+        playlist += "#EXT-X-VERSION:3\n";
+        playlist += `#EXT-X-TARGETDURATION:${this.segmentDuration}\n`;
+        playlist += "#EXT-X-MEDIA-SEQUENCE:0\n";
+
+        for (let i = 0; i < segmentInfo.totalSegments; i++) {
+            const filename = segmentInfo.segmentFiles[i];
+            playlist += `#EXTINF:${this.segmentDuration}.0,\n`;
+            playlist += `https://${WEBSITE_DOMAIN}/cache/movies/${movieId}/segments/${filename}\n`;
+        }
+
+        playlist += "#EXT-X-ENDLIST\n";
+
+        const playlistParams = {
+            Bucket: this.bucketName,
+            Key: `cache/movies/${movieId}/playlist.m3u8`,
+            Body: playlist,
+            ContentType: "application/vnd.apple.mpegurl",
+        };
+
+        await s3.upload(playlistParams).promise();
+        console.log(`📝 Final playlist uploaded for movie: ${movieId}`);
+    }
+
     async updateUploadStatus(movieId, uploadSession) {
-        // This could update DynamoDB, send to SQS, or call an API
-        // For now, just log the status
         const progress = (
-            (uploadSession.uploadedChunks / uploadSession.totalChunks) *
+            (uploadSession.uploadedSegments / uploadSession.totalSegments) *
             100
         ).toFixed(1);
         const elapsed = ((Date.now() - uploadSession.startTime) / 1000).toFixed(
@@ -202,70 +406,34 @@ class MP4ChunkedUploader {
         console.log(
             `📊 Status Update - Movie: ${movieId}, Progress: ${progress}%, Elapsed: ${elapsed}s, Status: ${uploadSession.status}`
         );
-
-        // Example: Send status to API endpoint
-        // await this.sendStatusUpdate(movieId, uploadSession);
     }
 
-    async sendStatusUpdate(movieId, uploadSession) {
-        // Example API call to update backend
+    async cleanup(movieId) {
         try {
-            const response = await fetch("https://your-api.com/upload-status", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    movieId,
-                    progress:
-                        (uploadSession.uploadedChunks /
-                            uploadSession.totalChunks) *
-                        100,
-                    status: uploadSession.status,
-                    uploadedChunks: uploadSession.uploadedChunks,
-                    totalChunks: uploadSession.totalChunks,
-                }),
-            });
+            const outputDir = path.join(this.tempDir, movieId);
+            if (fs.existsSync(outputDir)) {
+                const files = fs.readdirSync(outputDir);
+                for (const file of files) {
+                    fs.unlinkSync(path.join(outputDir, file));
+                }
+                fs.rmdirSync(outputDir);
+                console.log(`🧹 Cleaned up temp files for: ${movieId}`);
+            }
         } catch (error) {
-            console.warn("Failed to send status update:", error);
+            console.warn(`⚠️ Cleanup failed for ${movieId}:`, error.message);
         }
-    }
-
-    async generatePlaylist(movieId, totalChunks) {
-        // Generate HLS playlist for the uploaded chunks
-        let playlist = "#EXTM3U\n";
-        playlist += "#EXT-X-VERSION:3\n";
-        playlist += "#EXT-X-TARGETDURATION:10\n";
-        playlist += "#EXT-X-MEDIA-SEQUENCE:0\n";
-
-        for (let i = 0; i < totalChunks; i++) {
-            playlist += "#EXTINF:10.0,\n";
-            playlist += `https://${WEBSITE_DOMAIN}/cache/movies/${movieId}/chunks/chunk_${i
-                .toString()
-                .padStart(6, "0")}.mp4\n`;
-        }
-
-        playlist += "#EXT-X-ENDLIST\n";
-
-        // Upload playlist to S3
-        const playlistParams = {
-            Bucket: this.bucketName,
-            Key: `cache/movies/${movieId}/playlist.m3u8`,
-            Body: playlist,
-            ContentType: "application/vnd.apple.mpegurl",
-        };
-
-        await s3.upload(playlistParams).promise();
-        console.log(`📝 Playlist generated for movie: ${movieId}`);
     }
 }
 
 // Worker implementation
 class MovieUploadWorker {
     constructor() {
-        this.uploader = new MP4ChunkedUploader({
+        this.uploader = new MP4HLSUploader({
             bucketName: S3_BUCKET_NAME,
-            chunkSizeBytes: 10 * 1024 * 1024, // 10MB chunks
+            segmentDuration: 10, // 10 second segments
             concurrentUploads: 3,
-            priorityChunks: 5,
+            prioritySegments: 5,
+            tempDir: "./temp",
         });
 
         this.isProcessing = false;
@@ -289,16 +457,13 @@ class MovieUploadWorker {
                 throw new Error(`File not found: ${moviePath}`);
             }
 
+            // Check if FFmpeg is available
+            await this.checkFFmpeg();
+
             // Start upload
             const uploadSession = await this.uploader.uploadMovie(
                 moviePath,
                 movieId
-            );
-
-            // Generate playlist after upload
-            await this.uploader.generatePlaylist(
-                movieId,
-                uploadSession.totalChunks
             );
 
             console.log(`✅ Movie upload completed: ${movieId}`);
@@ -317,19 +482,42 @@ class MovieUploadWorker {
         }
     }
 
+    async checkFFmpeg() {
+        return new Promise((resolve, reject) => {
+            const ffmpeg = spawn("ffmpeg", ["-version"]);
+
+            ffmpeg.on("close", (code) => {
+                if (code === 0) {
+                    resolve();
+                } else {
+                    reject(
+                        new Error(
+                            "FFmpeg not found. Please install FFmpeg to use this uploader."
+                        )
+                    );
+                }
+            });
+
+            ffmpeg.on("error", () => {
+                reject(
+                    new Error(
+                        "FFmpeg not found. Please install FFmpeg to use this uploader."
+                    )
+                );
+            });
+        });
+    }
+
     start() {
-        console.log("🚀 Movie upload worker started");
+        console.log("🚀 Movie HLS upload worker started");
         console.log("Waiting for upload requests...");
 
-        // Example: Listen for requests (you'd replace this with SQS, WebSocket, etc.)
-        // For demo, we'll just process a test file
         this.processTestUpload();
     }
 
     processTestUpload() {
-        // Example usage - replace with your actual movie file
         const testMoviePath = "./tst/test-movie.mp4";
-        const testMovieId = "test"; // + "_" + Date.now();
+        const testMovieId = "test";
 
         setTimeout(() => {
             if (fs.existsSync(testMoviePath)) {
@@ -349,4 +537,4 @@ if (require.main === module) {
     worker.start();
 }
 
-module.exports = { MP4ChunkedUploader, MovieUploadWorker };
+module.exports = { MP4HLSUploader, MovieUploadWorker };
