@@ -25,9 +25,4 @@ if [ -z "$AWS_REGION" ]; then
   exit 1
 fi
 
-if [ -z "$S3_BUCKET_NAME" ]; then
-  echo "Error: S3_BUCKET_NAME not set"
-  exit 1
-fi
-
 npm run start
