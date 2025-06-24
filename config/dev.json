@@ -1,0 +1,11 @@
+{
+    "region": "us-east-1",
+    "userPoolId": "us-east-1_7PxCwRosi",
+    "clientId": "jd5ta6pde3j5sl2fhl11qgodh",
+    "identityPoolId": "us-east-1:570a2eb4-5ca1-45e9-af46-bd0fa187f7fc",
+    "mediaBucketName": "media-library-media-738123590383-dev",
+    "playlistBucketName": "media-library-playlist-738123590383-dev",
+    "websiteDomain": "media-dev.anuv.me",
+    "mediaUploadPath": "media",
+    "playlistUploadPath": "media"
+}

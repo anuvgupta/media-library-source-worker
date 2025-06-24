@@ -1,802 +1,616 @@
-const AWS = require("aws-sdk");
+#!/usr/bin/env node
+
+// main.js
+// Worker script for uploading media to S3 using Cognito authentication
+
+const {
+    CognitoIdentityProviderClient,
+    InitiateAuthCommand,
+} = require("@aws-sdk/client-cognito-identity-provider");
+const {
+    CognitoIdentityClient,
+    GetIdCommand,
+    GetCredentialsForIdentityCommand,
+} = require("@aws-sdk/client-cognito-identity");
+const {
+    S3Client,
+    PutObjectCommand,
+    ListObjectsV2Command,
+} = require("@aws-sdk/client-s3");
+const { Upload } = require("@aws-sdk/lib-storage");
 const fs = require("fs");
 const path = require("path");
-const { spawn } = require("child_process");
-const { promisify } = require("util");
+const readline = require("readline");
 
-const S3_MEDIA_BUCKET_NAME = process.env.S3_MEDIA_BUCKET_NAME;
-const S3_MEDIA_UPLOAD_PATH = process.env.S3_MEDIA_UPLOAD_PATH;
-const S3_PLAYLIST_BUCKET_NAME = process.env.S3_PLAYLIST_BUCKET_NAME;
-const S3_PLAYLIST_UPLOAD_PATH = process.env.S3_PLAYLIST_UPLOAD_PATH;
-const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID;
-const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY;
-const AWS_REGION = process.env.AWS_REGION;
-const WEBSITE_DOMAIN = process.env.WEBSITE_DOMAIN;
+const { VideoHLSUploader } = require("./VideoHLSUploader/index.js");
 
-// Configure AWS
-const s3 = new AWS.S3({
-    region: AWS_REGION,
-    accessKeyId: AWS_ACCESS_KEY_ID,
-    secretAccessKey: AWS_SECRET_ACCESS_KEY,
-});
+// Configuration
+const CONFIG_FILE = path.join(__dirname, "../config/dev.json");
+const CONFIG = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
 
-class VideoHLSUploader {
-    constructor(options = {}) {
-        this.mediaBucketName = options.mediaBucketName || "example-bucket";
-        this.playlistBucketName =
-            options.playlistBucketName || "example-bucket";
-        this.segmentDuration = options.segmentDuration || 10; // 10 second segments
-        this.concurrentUploads = options.concurrentUploads || 3;
-        this.prioritySegments = options.prioritySegments || 5; // Upload first N segments immediately
-        this.tempDir = options.tempDir || "./temp";
-        this.supportedFormats = [".mp4", ".mkv", ".avi", ".mov", ".m4v"];
+// Token storage file
+const TOKEN_FILE = path.join(__dirname, "../.worker-tokens.json");
 
-        // Ensure temp directory exists
-        if (!fs.existsSync(this.tempDir)) {
-            fs.mkdirSync(this.tempDir, { recursive: true });
-        }
-    }
-
-    async uploadMovie(filePath, movieId) {
-        try {
-            console.log(
-                `Starting HLS conversion and upload for movie: ${movieId}`
-            );
-            console.log(`File: ${filePath}`);
-
-            // Validate file format
-            if (!this.isValidVideoFile(filePath)) {
-                throw new Error(
-                    `Unsupported video format. Supported: ${this.supportedFormats.join(
-                        ", "
-                    )}`
-                );
-            }
-
-            const fileStats = fs.statSync(filePath);
-            const totalSize = fileStats.size;
-            console.log(
-                `Total size: ${(totalSize / 1024 / 1024).toFixed(2)} MB`
-            );
-
-            // Analyze video file
-            const videoInfo = await this.analyzeVideoFile(filePath);
-            console.log(
-                `Video info: ${videoInfo.resolution}, ${videoInfo.videoCodec}, ${videoInfo.audioCodec}, ${videoInfo.duration}s`
-            );
-
-            // Create upload session
-            const uploadSession = {
-                movieId,
-                totalSegments: 0,
-                uploadedSegments: 0,
-                totalSize,
-                startTime: Date.now(),
-                status: "converting",
-                videoInfo,
-            };
-
-            // Step 1: Convert to HLS segments
-            const segmentInfo = await this.convertToHLS(
-                filePath,
-                movieId,
-                videoInfo
-            );
-            uploadSession.totalSegments = segmentInfo.totalSegments;
-
-            console.log(`Total segments: ${segmentInfo.totalSegments}`);
-            console.log(`Segment duration: ${this.segmentDuration}s`);
-
-            // Step 2: Upload priority segments first
-            await this.uploadPrioritySegments(
-                movieId,
-                uploadSession,
-                segmentInfo
-            );
-
-            // Step 3: Upload remaining segments
-            await this.uploadRemainingSegments(
-                movieId,
-                uploadSession,
-                segmentInfo
-            );
-
-            // Step 4: Upload master playlist
-            await this.uploadMasterPlaylist(movieId, segmentInfo);
-
-            // Cleanup temp files
-            await this.cleanup(movieId);
-
-            console.log(`✅ Upload completed for movie: ${movieId}`);
-            return uploadSession;
-        } catch (error) {
-            console.error(`❌ Upload failed for movie: ${movieId}`, error);
-            await this.cleanup(movieId);
-            throw error;
-        }
-    }
-
-    isValidVideoFile(filePath) {
-        const ext = path.extname(filePath).toLowerCase();
-        return this.supportedFormats.includes(ext);
-    }
-
-    async analyzeVideoFile(filePath) {
-        console.log(`🔍 Analyzing video file...`);
-
-        return new Promise((resolve, reject) => {
-            const ffprobeArgs = [
-                "-v",
-                "quiet",
-                "-print_format",
-                "json",
-                "-show_format",
-                "-show_streams",
-                filePath,
-            ];
-
-            const ffprobe = spawn("ffprobe", ffprobeArgs);
-            let stdout = "";
-            let stderr = "";
-
-            ffprobe.stdout.on("data", (data) => {
-                stdout += data.toString();
-            });
-
-            ffprobe.stderr.on("data", (data) => {
-                stderr += data.toString();
-            });
-
-            ffprobe.on("close", (code) => {
-                if (code !== 0) {
-                    reject(new Error(`FFprobe failed: ${stderr}`));
-                    return;
-                }
-
-                try {
-                    const info = JSON.parse(stdout);
-                    const videoStream = info.streams.find(
-                        (s) => s.codec_type === "video"
-                    );
-                    const audioStream = info.streams.find(
-                        (s) => s.codec_type === "audio"
-                    );
-
-                    const videoInfo = {
-                        duration: parseFloat(info.format.duration),
-                        videoCodec: videoStream
-                            ? videoStream.codec_name
-                            : "unknown",
-                        audioCodec: audioStream
-                            ? audioStream.codec_name
-                            : "unknown",
-                        resolution: videoStream
-                            ? `${videoStream.width}x${videoStream.height}`
-                            : "unknown",
-                        bitrate: parseInt(info.format.bit_rate) || 0,
-                        needsReencoding: this.needsReencoding(
-                            videoStream,
-                            audioStream
-                        ),
-                    };
-
-                    resolve(videoInfo);
-                } catch (error) {
-                    reject(
-                        new Error(
-                            `Failed to parse video info: ${error.message}`
-                        )
-                    );
-                }
-            });
-
-            ffprobe.on("error", (error) => {
-                reject(new Error(`FFprobe spawn error: ${error.message}`));
-            });
-        });
-    }
-
-    needsReencoding(videoStream, audioStream) {
-        // Check if video needs re-encoding
-        const videoCodec = videoStream
-            ? videoStream.codec_name.toLowerCase()
-            : "";
-        const audioCodec = audioStream
-            ? audioStream.codec_name.toLowerCase()
-            : "";
-
-        // Keep modern codecs: H.264, H.265/HEVC, VP9, AV1
-        const compatibleVideoCodecs = [
-            "h264",
-            "avc",
-            "hevc",
-            "h265",
-            "vp9",
-            "av01",
-        ];
-        const videoNeedsReencoding =
-            !compatibleVideoCodecs.includes(videoCodec);
-
-        // Keep web-compatible audio codecs
-        const compatibleAudioCodecs = ["aac", "mp3", "opus"];
-        const audioNeedsReencoding =
-            !compatibleAudioCodecs.includes(audioCodec);
-
-        return {
-            video: videoNeedsReencoding,
-            audio: audioNeedsReencoding,
-            reason: {
-                video: videoNeedsReencoding
-                    ? `${videoCodec} not web-compatible`
-                    : "keeping original",
-                audio: audioNeedsReencoding
-                    ? `${audioCodec} -> aac`
-                    : "keeping original",
-            },
-        };
-    }
-
-    async convertToHLS(filePath, movieId, videoInfo) {
-        console.log(`🔄 Converting to HLS segments...`);
-
-        const outputDir = path.join(this.tempDir, movieId);
-        if (!fs.existsSync(outputDir)) {
-            fs.mkdirSync(outputDir, { recursive: true });
-        }
-
-        const playlistPath = path.join(outputDir, "playlist.m3u8");
-        const segmentPattern = path.join(outputDir, "segment_%06d.ts");
-
-        return new Promise((resolve, reject) => {
-            // Build FFmpeg arguments based on video analysis
-            const ffmpegArgs = ["-i", filePath];
-
-            // Video encoding settings
-            if (videoInfo.needsReencoding.video) {
-                console.log(
-                    `🔄 Re-encoding video: ${videoInfo.needsReencoding.reason.video}`
-                );
-                ffmpegArgs.push(
-                    "-c:v",
-                    "libx264", // Fallback to H.264 for unsupported codecs
-                    "-preset",
-                    "fast", // Encoding speed
-                    "-crf",
-                    "23", // Quality (lower = better)
-                    "-profile:v",
-                    "high", // H.264 profile
-                    "-level:v",
-                    "4.0" // H.264 level
-                );
-            } else {
-                console.log(
-                    `✅ Video codec compatible (${videoInfo.videoCodec}), copying stream`
-                );
-                ffmpegArgs.push("-c:v", "copy"); // Copy video stream without re-encoding
-            }
-
-            // Audio encoding settings
-            if (videoInfo.needsReencoding.audio) {
-                console.log(
-                    `🔄 Re-encoding audio: ${videoInfo.needsReencoding.reason.audio}`
-                );
-                ffmpegArgs.push(
-                    "-c:a",
-                    "aac", // Re-encode to AAC
-                    "-b:a",
-                    "128k" // Audio bitrate
-                );
-            } else {
-                console.log(
-                    `✅ Audio codec compatible (${videoInfo.audioCodec}), copying stream`
-                );
-                ffmpegArgs.push("-c:a", "copy"); // Copy audio stream without re-encoding
-            }
-
-            // HLS segmentation settings
-            ffmpegArgs.push(
-                "-sc_threshold",
-                "0", // Disable scene change detection
-                "-g",
-                "48", // GOP size (keyframe interval)
-                "-keyint_min",
-                "48", // Minimum keyframe interval
-                "-hls_time",
-                this.segmentDuration.toString(), // Segment duration
-                "-hls_playlist_type",
-                "vod", // Video on demand
-                "-hls_segment_filename",
-                segmentPattern,
-                "-f",
-                "hls",
-                playlistPath
-            );
-
-            console.log(`Running FFmpeg: ffmpeg ${ffmpegArgs.join(" ")}`);
-
-            const ffmpeg = spawn("ffmpeg", ffmpegArgs);
-            let stderr = "";
-
-            ffmpeg.stderr.on("data", (data) => {
-                stderr += data.toString();
-                // Parse progress from FFmpeg output
-                const progressMatch = stderr.match(
-                    /time=(\d{2}):(\d{2}):(\d{2})/
-                );
-                if (progressMatch) {
-                    const hours = parseInt(progressMatch[1]);
-                    const minutes = parseInt(progressMatch[2]);
-                    const seconds = parseInt(progressMatch[3]);
-                    const currentTime = hours * 3600 + minutes * 60 + seconds;
-                    const totalTime = videoInfo.duration;
-                    const progress =
-                        totalTime > 0
-                            ? ((currentTime / totalTime) * 100).toFixed(1)
-                            : 0;
-                    process.stdout.write(
-                        `\r🔄 Converting... ${Math.floor(currentTime / 60)}:${(
-                            currentTime % 60
-                        )
-                            .toString()
-                            .padStart(2, "0")} (${progress}%)`
-                    );
-                }
-            });
-
-            ffmpeg.on("close", (code) => {
-                console.log(""); // New line after progress
-
-                if (code !== 0) {
-                    console.error("FFmpeg stderr:", stderr);
-                    reject(new Error(`FFmpeg failed with code ${code}`));
-                    return;
-                }
-
-                try {
-                    // Count generated segments
-                    const files = fs.readdirSync(outputDir);
-                    const segmentFiles = files.filter(
-                        (f) => f.startsWith("segment_") && f.endsWith(".ts")
-                    );
-                    const totalSegments = segmentFiles.length;
-
-                    console.log(
-                        `✅ Conversion completed. Generated ${totalSegments} segments`
-                    );
-
-                    resolve({
-                        totalSegments,
-                        outputDir,
-                        playlistPath,
-                        segmentFiles: segmentFiles.sort(),
-                    });
-                } catch (error) {
-                    reject(error);
-                }
-            });
-
-            ffmpeg.on("error", (error) => {
-                reject(new Error(`FFmpeg spawn error: ${error.message}`));
-            });
-        });
-    }
-
-    async uploadPrioritySegments(movieId, uploadSession, segmentInfo) {
-        console.log(
-            `🚀 Uploading priority segments (first ${this.prioritySegments})...`
-        );
-
-        const priorityFiles = segmentInfo.segmentFiles.slice(
-            0,
-            Math.min(this.prioritySegments, segmentInfo.totalSegments)
-        );
-
-        const priorityPromises = priorityFiles.map((filename, index) =>
-            this.uploadSegment(
-                movieId,
-                filename,
-                index,
-                uploadSession,
-                segmentInfo.outputDir
-            )
-        );
-
-        await Promise.all(priorityPromises);
-
-        // Upload initial playlist for priority segments
-        await this.uploadPartialPlaylist(
-            movieId,
-            priorityFiles.length,
-            segmentInfo
-        );
-
-        console.log(`✅ Priority segments uploaded. Ready for playback!`);
-
-        uploadSession.status = "ready_for_playback";
-        await this.updateUploadStatus(movieId, uploadSession);
-    }
-
-    async uploadRemainingSegments(movieId, uploadSession, segmentInfo) {
-        console.log(`📤 Uploading remaining segments...`);
-
-        const remainingFiles = segmentInfo.segmentFiles.slice(
-            this.prioritySegments
-        );
-
-        // Upload remaining segments with concurrency control
-        await this.uploadSegmentsWithConcurrency(
-            movieId,
-            remainingFiles,
-            this.prioritySegments,
-            uploadSession,
-            segmentInfo.outputDir,
-            segmentInfo
-        );
-
-        uploadSession.status = "completed";
-        await this.updateUploadStatus(movieId, uploadSession);
-    }
-
-    async uploadSegmentsWithConcurrency(
-        movieId,
-        segmentFiles,
-        startIndex,
-        uploadSession,
-        outputDir,
-        segmentInfo
-    ) {
-        const batches = [];
-        for (let i = 0; i < segmentFiles.length; i += this.concurrentUploads) {
-            batches.push(segmentFiles.slice(i, i + this.concurrentUploads));
-        }
-
-        for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-            const batch = batches[batchIndex];
-            const batchPromises = batch.map((filename, batchPos) => {
-                const segmentIndex =
-                    startIndex + batchIndex * this.concurrentUploads + batchPos;
-                return this.uploadSegment(
-                    movieId,
-                    filename,
-                    segmentIndex,
-                    uploadSession,
-                    outputDir
-                );
-            });
-            await Promise.all(batchPromises);
-
-            // Update playlist after each batch
-            const uploadedCount = Math.min(
-                this.prioritySegments +
-                    (batchIndex + 1) * this.concurrentUploads,
-                uploadSession.totalSegments
-            );
-            await this.uploadPartialPlaylist(
-                movieId,
-                uploadedCount,
-                segmentInfo
-            );
-        }
-    }
-
-    async uploadSegment(
-        movieId,
-        filename,
-        segmentIndex,
-        uploadSession,
-        outputDir
-    ) {
-        try {
-            const segmentPath = path.join(outputDir, filename);
-            const segmentBuffer = fs.readFileSync(segmentPath);
-
-            const key = `${S3_MEDIA_UPLOAD_PATH}/${movieId}/segments/${filename}`;
-
-            const uploadParams = {
-                Bucket: this.mediaBucketName,
-                Key: key,
-                Body: segmentBuffer,
-                ContentType: "video/mp2t", // MPEG-2 Transport Stream
-                CacheControl: "public, max-age=31536000", // Cache segments for 1 year (they never change)
-                Metadata: {
-                    movieId: movieId,
-                    segmentIndex: segmentIndex.toString(),
-                    totalSegments: uploadSession.totalSegments.toString(),
-                },
-            };
-
-            await s3.upload(uploadParams).promise();
-
-            uploadSession.uploadedSegments++;
-            const progress = (
-                (uploadSession.uploadedSegments / uploadSession.totalSegments) *
-                100
-            ).toFixed(1);
-
-            console.log(
-                `📦 Segment ${segmentIndex + 1}/${
-                    uploadSession.totalSegments
-                } uploaded (${progress}%)`
-            );
-
-            // Update progress periodically
-            if (uploadSession.uploadedSegments % 3 === 0) {
-                await this.updateUploadStatus(movieId, uploadSession);
-            }
-        } catch (error) {
-            console.error(`❌ Failed to upload segment ${filename}:`, error);
-            throw error;
-        }
-    }
-
-    async uploadPartialPlaylist(movieId, segmentCount, segmentInfo) {
-        // Generate HLS playlist for available segments
-        let playlist = "#EXTM3U\n";
-        playlist += "#EXT-X-VERSION:3\n";
-        playlist += `#EXT-X-TARGETDURATION:${this.segmentDuration}\n`;
-        playlist += "#EXT-X-MEDIA-SEQUENCE:0\n";
-
-        // Add segments that are available
-        for (let i = 0; i < segmentCount; i++) {
-            const filename = segmentInfo.segmentFiles[i];
-            playlist += `#EXTINF:${this.segmentDuration}.0,\n`;
-            playlist += `https://${WEBSITE_DOMAIN}/${S3_MEDIA_UPLOAD_PATH}/${movieId}/segments/${filename}\n`;
-        }
-
-        // Only add end tag if all segments are uploaded
-        const isComplete = segmentCount >= segmentInfo.totalSegments;
-        if (isComplete) {
-            playlist += "#EXT-X-ENDLIST\n";
-        }
-
-        const playlistParams = {
-            Bucket: this.playlistBucketName,
-            Key: `${S3_PLAYLIST_UPLOAD_PATH}/${movieId}/playlist.m3u8`,
-            Body: playlist,
-            ContentType: "application/vnd.apple.mpegurl",
-            // // CRITICAL: Cache control for CDN compatibility
-            // CacheControl: isComplete
-            //     ? "public, max-age=3600" // Cache final playlist for 1 hour
-            //     : "no-cache, no-store, must-revalidate", // Never cache partial playlists
-            // Metadata: {
-            //     movieId: movieId,
-            //     segmentCount: segmentCount.toString(),
-            //     totalSegments: segmentInfo.totalSegments.toString(),
-            //     isComplete: isComplete.toString(),
-            // },
-        };
-
-        await s3.upload(playlistParams).promise();
-        console.log(
-            `📝 Playlist updated (${segmentCount}/${segmentInfo.totalSegments} segments) - Cache: ${playlistParams.CacheControl}`
-        );
-    }
-
-    async uploadMasterPlaylist(movieId, segmentInfo) {
-        // Generate final HLS playlist
-        let playlist = "#EXTM3U\n";
-        playlist += "#EXT-X-VERSION:3\n";
-        playlist += `#EXT-X-TARGETDURATION:${this.segmentDuration}\n`;
-        playlist += "#EXT-X-MEDIA-SEQUENCE:0\n";
-
-        for (let i = 0; i < segmentInfo.totalSegments; i++) {
-            const filename = segmentInfo.segmentFiles[i];
-            playlist += `#EXTINF:${this.segmentDuration}.0,\n`;
-            playlist += `https://${WEBSITE_DOMAIN}/${S3_MEDIA_UPLOAD_PATH}/${movieId}/segments/${filename}\n`;
-        }
-
-        playlist += "#EXT-X-ENDLIST\n";
-
-        const playlistParams = {
-            Bucket: this.playlistBucketName,
-            Key: `${S3_PLAYLIST_UPLOAD_PATH}/${movieId}/playlist.m3u8`,
-            Body: playlist,
-            ContentType: "application/vnd.apple.mpegurl",
-            // // Final playlist can be cached longer
-            // CacheControl: "public, max-age=86400", // Cache for 24 hours
-            // Metadata: {
-            //     movieId: movieId,
-            //     totalSegments: segmentInfo.totalSegments.toString(),
-            //     isComplete: "true",
-            // },
-        };
-
-        await s3.upload(playlistParams).promise();
-        console.log(
-            `📝 Final playlist uploaded for movie: ${movieId} - Cacheable for 24h`
-        );
-    }
-
-    async updateUploadStatus(movieId, uploadSession) {
-        const progress = (
-            (uploadSession.uploadedSegments / uploadSession.totalSegments) *
-            100
-        ).toFixed(1);
-        const elapsed = ((Date.now() - uploadSession.startTime) / 1000).toFixed(
-            1
-        );
-
-        console.log(
-            `📊 Status Update - Movie: ${movieId}, Progress: ${progress}%, Elapsed: ${elapsed}s, Status: ${uploadSession.status}`
-        );
-    }
-
-    async cleanup(movieId) {
-        try {
-            const outputDir = path.join(this.tempDir, movieId);
-            if (fs.existsSync(outputDir)) {
-                const files = fs.readdirSync(outputDir);
-                for (const file of files) {
-                    fs.unlinkSync(path.join(outputDir, file));
-                }
-                fs.rmdirSync(outputDir);
-                console.log(`🧹 Cleaned up temp files for: ${movieId}`);
-            }
-        } catch (error) {
-            console.warn(`⚠️ Cleanup failed for ${movieId}:`, error.message);
-        }
-    }
-}
-
-// Worker implementation
-class MovieUploadWorker {
+class MediaWorker {
     constructor() {
-        this.uploader = new VideoHLSUploader({
-            mediaBucketName: S3_MEDIA_BUCKET_NAME,
-            playlistBucketName: S3_PLAYLIST_BUCKET_NAME,
-            segmentDuration: 10, // 10 second segments
+        this.cognitoIdentityProvider = new CognitoIdentityProviderClient({
+            region: CONFIG.region,
+        });
+        this.cognitoIdentity = new CognitoIdentityClient({
+            region: CONFIG.region,
+        });
+        this.s3 = null; // Will be initialized after authentication
+        this.tokens = this.loadTokens();
+        this.credentials = null;
+        this.hlsUploader = null; // Will be initialized after S3 client is ready
+    }
+
+    // Initialize HLS uploader after S3 client is ready
+    initializeHLSUploader() {
+        if (!this.s3 || !this.credentials?.identityId) {
+            throw new Error(
+                "S3 client and credentials must be initialized first"
+            );
+        }
+
+        this.hlsUploader = new VideoHLSUploader({
+            s3Client: this.s3,
+            mediaBucketName: CONFIG.mediaBucketName,
+            playlistBucketName: CONFIG.playlistBucketName,
+            mediaUploadPath: CONFIG.mediaUploadPath,
+            playlistUploadPath: CONFIG.playlistUploadPath,
+            websiteDomain: CONFIG.websiteDomain || "your-domain.com",
+            segmentDuration: 10,
             concurrentUploads: 3,
             prioritySegments: 5,
             tempDir: "./temp",
         });
 
-        this.isProcessing = false;
-        this.queue = [];
+        console.log("✅ HLS Uploader initialized");
     }
 
-    async processUploadRequest(moviePath, movieId) {
-        if (this.isProcessing) {
-            console.log(`🔄 Adding to queue: ${movieId}`);
-            this.queue.push({ moviePath, movieId });
-            return;
-        }
-
-        this.isProcessing = true;
-
+    // Load stored tokens from file
+    loadTokens() {
         try {
-            console.log(`🎬 Processing upload request for: ${movieId}`);
-
-            // Validate file exists
-            if (!fs.existsSync(moviePath)) {
-                throw new Error(`File not found: ${moviePath}`);
+            if (fs.existsSync(TOKEN_FILE)) {
+                const data = fs.readFileSync(TOKEN_FILE, "utf8");
+                return JSON.parse(data);
             }
-
-            // Check if FFmpeg is available
-            await this.checkFFmpeg();
-
-            // Start upload
-            const uploadSession = await this.uploader.uploadMovie(
-                moviePath,
-                movieId
-            );
-
-            console.log(`✅ Movie upload completed: ${movieId}`);
         } catch (error) {
-            console.error(`❌ Upload failed: ${error.message}`);
-        } finally {
-            this.isProcessing = false;
+            console.warn("Could not load stored tokens:", error.message);
+        }
+        return null;
+    }
 
-            // Process next in queue
-            if (this.queue.length > 0) {
-                const next = this.queue.shift();
-                setImmediate(() =>
-                    this.processUploadRequest(next.moviePath, next.movieId)
-                );
-            }
+    // Save tokens to file
+    saveTokens(tokens) {
+        try {
+            fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2));
+            console.log("Tokens saved successfully");
+        } catch (error) {
+            console.error("Failed to save tokens:", error.message);
         }
     }
 
-    async checkFFmpeg() {
-        return new Promise((resolve, reject) => {
-            // Check FFmpeg
-            const ffmpeg = spawn("ffmpeg", ["-version"]);
+    // Get user input securely
+    async getInput(prompt, hidden = false) {
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout,
+        });
 
-            ffmpeg.on("close", (code) => {
-                if (code === 0) {
-                    // Check FFprobe
-                    const ffprobe = spawn("ffprobe", ["-version"]);
-
-                    ffprobe.on("close", (probeCode) => {
-                        if (probeCode === 0) {
-                            resolve();
-                        } else {
-                            reject(
-                                new Error(
-                                    "FFprobe not found. Please install FFmpeg package which includes FFprobe."
-                                )
-                            );
-                        }
-                    });
-
-                    ffprobe.on("error", () => {
-                        reject(
-                            new Error(
-                                "FFprobe not found. Please install FFmpeg package which includes FFprobe."
-                            )
-                        );
-                    });
-                } else {
-                    reject(
-                        new Error(
-                            "FFmpeg not found. Please install FFmpeg to use this uploader."
-                        )
-                    );
-                }
-            });
-
-            ffmpeg.on("error", () => {
-                reject(
-                    new Error(
-                        "FFmpeg not found. Please install FFmpeg to use this uploader."
-                    )
-                );
-            });
+        return new Promise((resolve) => {
+            if (hidden) {
+                const stdin = process.openStdin();
+                process.stdout.write(prompt);
+                stdin.setRawMode(true);
+                stdin.resume();
+                stdin.setEncoding("utf8");
+                let password = "";
+                stdin.on("data", (ch) => {
+                    ch = ch + "";
+                    switch (ch) {
+                        case "\n":
+                        case "\r":
+                        case "\u0004":
+                            stdin.setRawMode(false);
+                            stdin.pause();
+                            console.log("");
+                            resolve(password);
+                            break;
+                        case "\u0003":
+                            process.exit();
+                            break;
+                        default:
+                            password += ch;
+                            process.stdout.write("*");
+                            break;
+                    }
+                });
+            } else {
+                rl.question(prompt, (answer) => {
+                    rl.close();
+                    resolve(answer);
+                });
+            }
         });
     }
 
-    start() {
-        console.log("🚀 Video HLS upload worker started");
-        console.log("Supported formats: .mp4, .mkv, .avi, .mov, .m4v");
-        console.log(
-            "Supported codecs: H.264, H.265/HEVC, VP9, AV1 (keeps original quality)"
-        );
-        console.log(
-            "⚡ Fast processing: Only re-encodes truly incompatible codecs"
-        );
-        console.log("🌐 CDN-optimized: Smart caching for progressive uploads");
-        console.log("Waiting for upload requests...");
+    // Authenticate with username/password
+    async authenticate(username, password) {
+        try {
+            console.log("Authenticating...");
 
-        this.processTestUpload();
+            const command = new InitiateAuthCommand({
+                AuthFlow: "USER_PASSWORD_AUTH",
+                ClientId: CONFIG.clientId,
+                AuthParameters: {
+                    USERNAME: username,
+                    PASSWORD: password,
+                },
+            });
+
+            const authResult = await this.cognitoIdentityProvider.send(command);
+
+            if (authResult.ChallengeName) {
+                throw new Error(
+                    `Authentication challenge required: ${authResult.ChallengeName}`
+                );
+            }
+
+            const tokens = {
+                accessToken: authResult.AuthenticationResult.AccessToken,
+                idToken: authResult.AuthenticationResult.IdToken,
+                refreshToken: authResult.AuthenticationResult.RefreshToken,
+                expiresAt:
+                    Date.now() +
+                    authResult.AuthenticationResult.ExpiresIn * 1000,
+                username: username,
+            };
+
+            this.tokens = tokens;
+            this.saveTokens(tokens);
+
+            console.log("Authentication successful!");
+            return tokens;
+        } catch (error) {
+            console.error("Authentication failed:", error.message);
+            throw error;
+        }
     }
 
-    processTestUpload() {
-        // Support multiple test file formats
-        const testFiles = [
-            "./tst/test-movie.mp4",
-            "./tst/test-movie.mkv",
-            "./tst/test.mp4",
-            "./tst/test.mkv",
-        ];
+    // Refresh access token using refresh token
+    async refreshTokens() {
+        if (!this.tokens?.refreshToken) {
+            throw new Error("No refresh token available");
+        }
 
-        const testMovieId = "test";
+        try {
+            console.log("Refreshing tokens...");
 
-        setTimeout(() => {
-            let foundFile = null;
-            for (const filePath of testFiles) {
-                if (fs.existsSync(filePath)) {
-                    foundFile = filePath;
-                    break;
+            const command = new InitiateAuthCommand({
+                AuthFlow: "REFRESH_TOKEN_AUTH",
+                ClientId: CONFIG.clientId,
+                AuthParameters: {
+                    REFRESH_TOKEN: this.tokens.refreshToken,
+                },
+            });
+
+            const refreshResult = await this.cognitoIdentityProvider.send(
+                command
+            );
+
+            const newTokens = {
+                ...this.tokens,
+                accessToken: refreshResult.AuthenticationResult.AccessToken,
+                idToken: refreshResult.AuthenticationResult.IdToken,
+                expiresAt:
+                    Date.now() +
+                    refreshResult.AuthenticationResult.ExpiresIn * 1000,
+            };
+
+            // Update refresh token if a new one was provided
+            if (refreshResult.AuthenticationResult.RefreshToken) {
+                newTokens.refreshToken =
+                    refreshResult.AuthenticationResult.RefreshToken;
+            }
+
+            this.tokens = newTokens;
+            this.saveTokens(newTokens);
+
+            console.log("Tokens refreshed successfully!");
+            return newTokens;
+        } catch (error) {
+            console.error("Token refresh failed:", error.message);
+            throw error;
+        }
+    }
+
+    // Check if tokens are valid and refresh if needed
+    async ensureValidTokens() {
+        if (!this.tokens) {
+            return false;
+        }
+
+        // Check if access token is expired (with 5 minute buffer)
+        const fiveMinutes = 5 * 60 * 1000;
+        if (Date.now() + fiveMinutes >= this.tokens.expiresAt) {
+            try {
+                await this.refreshTokens();
+                return true;
+            } catch (error) {
+                console.log("Token refresh failed, need to re-authenticate");
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // Get AWS credentials using Cognito Identity
+    async getAWSCredentials() {
+        if (!this.tokens?.idToken) {
+            throw new Error("No ID token available");
+        }
+
+        try {
+            console.log("Getting AWS credentials...");
+
+            // Get identity ID
+            const getIdCommand = new GetIdCommand({
+                IdentityPoolId: CONFIG.identityPoolId,
+                Logins: {
+                    [`cognito-idp.${CONFIG.region}.amazonaws.com/${CONFIG.userPoolId}`]:
+                        this.tokens.idToken,
+                },
+            });
+
+            const identityResult = await this.cognitoIdentity.send(
+                getIdCommand
+            );
+            const identityId = identityResult.IdentityId;
+
+            // Get credentials for the identity
+            const getCredentialsCommand = new GetCredentialsForIdentityCommand({
+                IdentityId: identityId,
+                Logins: {
+                    [`cognito-idp.${CONFIG.region}.amazonaws.com/${CONFIG.userPoolId}`]:
+                        this.tokens.idToken,
+                },
+            });
+
+            const credentialsResult = await this.cognitoIdentity.send(
+                getCredentialsCommand
+            );
+
+            const credentials = {
+                accessKeyId: credentialsResult.Credentials.AccessKeyId,
+                secretAccessKey: credentialsResult.Credentials.SecretKey,
+                sessionToken: credentialsResult.Credentials.SessionToken,
+                identityId: identityId,
+            };
+
+            this.credentials = credentials;
+
+            // Initialize S3 client with the credentials
+            this.s3 = new S3Client({
+                region: CONFIG.region,
+                credentials: {
+                    accessKeyId: credentials.accessKeyId,
+                    secretAccessKey: credentials.secretAccessKey,
+                    sessionToken: credentials.sessionToken,
+                },
+            });
+
+            // Initialize HLS uploader after S3 client is ready
+            this.initializeHLSUploader();
+
+            console.log("AWS credentials obtained successfully!");
+            console.log("Identity ID:", identityId);
+
+            return credentials;
+        } catch (error) {
+            console.error("Failed to get AWS credentials:", error.message);
+            throw error;
+        }
+    }
+
+    // Upload file to S3 directly (for non-video files)
+    async uploadFile(filePath, bucketName, key) {
+        if (!this.s3) {
+            throw new Error(
+                "S3 client not initialized. Call getAWSCredentials() first."
+            );
+        }
+
+        try {
+            console.log(`Uploading ${filePath} to s3://${bucketName}/${key}`);
+
+            const fileContent = fs.readFileSync(filePath);
+
+            // For larger files, use the multipart upload
+            const upload = new Upload({
+                client: this.s3,
+                params: {
+                    Bucket: bucketName,
+                    Key: key,
+                    Body: fileContent,
+                    ContentType: this.getContentType(filePath),
+                },
+            });
+
+            // Optional: track upload progress
+            upload.on("httpUploadProgress", (progress) => {
+                if (progress.total) {
+                    const percentage = Math.round(
+                        (progress.loaded / progress.total) * 100
+                    );
+                    console.log(`Upload progress: ${percentage}%`);
                 }
+            });
+
+            const result = await upload.done();
+            console.log("Upload successful:", result.Location);
+            return result;
+        } catch (error) {
+            console.error("Upload failed:", error.message);
+            throw error;
+        }
+    }
+
+    // Get content type based on file extension
+    getContentType(filePath) {
+        const ext = path.extname(filePath).toLowerCase();
+        const contentTypes = {
+            ".mp4": "video/mp4",
+            ".mkv": "video/x-matroska",
+            ".avi": "video/x-msvideo",
+            ".mov": "video/quicktime",
+            ".mp3": "audio/mpeg",
+            ".flac": "audio/flac",
+            ".wav": "audio/wav",
+            ".m3u8": "application/vnd.apple.mpegurl",
+            ".ts": "video/mp2t",
+            ".json": "application/json",
+        };
+        return contentTypes[ext] || "application/octet-stream";
+    }
+
+    // Check if file is a video that should use HLS upload
+    isVideoFile(filePath) {
+        const ext = path.extname(filePath).toLowerCase();
+        const videoExtensions = [".mp4", ".mkv", ".avi", ".mov", ".m4v"];
+        return videoExtensions.includes(ext);
+    }
+
+    // Main authentication flow
+    async login() {
+        // Check if we have valid stored tokens
+        if (await this.ensureValidTokens()) {
+            console.log("Using stored authentication tokens");
+            await this.getAWSCredentials();
+            return;
+        }
+
+        // Need to authenticate
+        console.log("Authentication required");
+        const username = await this.getInput("Username: ");
+        const password = await this.getInput("Password: ", true);
+
+        await this.authenticate(username, password);
+        await this.getAWSCredentials();
+    }
+
+    // Upload media file with HLS conversion for videos
+    async uploadMedia(filePath) {
+        if (!this.credentials?.identityId) {
+            throw new Error("Not authenticated");
+        }
+
+        if (!fs.existsSync(filePath)) {
+            throw new Error(`File not found: ${filePath}`);
+        }
+
+        // Check if it's a video file that should use HLS
+        if (this.isVideoFile(filePath)) {
+            if (!this.hlsUploader) {
+                throw new Error("HLS uploader not initialized");
             }
 
-            if (foundFile) {
-                console.log(`Found test file: ${foundFile}`);
-                this.processUploadRequest(foundFile, testMovieId);
-            } else {
-                console.log("No test video found. Supported files:");
-                console.log("- ./tst/test-movie.mp4");
-                console.log("- ./tst/test-movie.mkv");
-                console.log("- ./tst/test.mp4");
-                console.log("- ./tst/test.mkv");
+            console.log(`Starting HLS upload for video: ${filePath}`);
+
+            // Set the upload paths for the user's folder
+            const ownerId = this.credentials.identityId;
+            const uploadSubpath = ownerId;
+            const fileName = path.basename(filePath, path.extname(filePath));
+            const movieId = fileName;
+
+            try {
+                const uploadSession = await this.hlsUploader.uploadMovie(
+                    filePath,
+                    movieId,
+                    uploadSubpath
+                );
+                console.log(`✅ HLS upload completed for movie: ${movieId}`);
+                return uploadSession;
+            } catch (error) {
+                console.error(`❌ HLS upload failed:`, error);
+                throw error;
             }
-        }, 2000);
+        } else {
+            // For non-video files, use direct S3 upload
+            console.log(`Uploading non-video file: ${filePath}`);
+            const ownerId = this.credentials.identityId;
+            const fileName = path.basename(filePath);
+            const key = `media/${ownerId}/files/${fileName}`;
+
+            return await this.uploadFile(filePath, CONFIG.mediaBucketName, key);
+        }
+    }
+
+    // List files in user's folder
+    async listFiles(bucketName) {
+        if (!this.s3 || !this.credentials?.identityId) {
+            throw new Error("Not authenticated");
+        }
+
+        try {
+            const command = new ListObjectsV2Command({
+                Bucket: bucketName,
+                Prefix: `media/${this.credentials.identityId}/`,
+            });
+
+            const result = await this.s3.send(command);
+            return result.Contents || [];
+        } catch (error) {
+            console.error("Failed to list files:", error.message);
+            throw error;
+        }
+    }
+
+    // Check FFmpeg availability
+    async checkFFmpeg() {
+        if (!this.hlsUploader) {
+            throw new Error("HLS uploader not initialized");
+        }
+
+        try {
+            // Access the method through the uploader instance
+            // Note: This assumes the checkFFmpeg method is accessible
+            // If it's not, we might need to implement our own check
+            const { spawn } = require("child_process");
+
+            return new Promise((resolve, reject) => {
+                const ffmpeg = spawn("ffmpeg", ["-version"]);
+
+                ffmpeg.on("close", (code) => {
+                    if (code === 0) {
+                        const ffprobe = spawn("ffprobe", ["-version"]);
+
+                        ffprobe.on("close", (probeCode) => {
+                            if (probeCode === 0) {
+                                console.log(
+                                    "✅ FFmpeg and FFprobe are available"
+                                );
+                                resolve();
+                            } else {
+                                reject(
+                                    new Error(
+                                        "FFprobe not found. Please install FFmpeg package."
+                                    )
+                                );
+                            }
+                        });
+
+                        ffprobe.on("error", () => {
+                            reject(
+                                new Error(
+                                    "FFprobe not found. Please install FFmpeg package."
+                                )
+                            );
+                        });
+                    } else {
+                        reject(
+                            new Error(
+                                "FFmpeg not found. Please install FFmpeg."
+                            )
+                        );
+                    }
+                });
+
+                ffmpeg.on("error", () => {
+                    reject(
+                        new Error("FFmpeg not found. Please install FFmpeg.")
+                    );
+                });
+            });
+        } catch (error) {
+            throw new Error(`FFmpeg check failed: ${error.message}`);
+        }
     }
 }
 
-// Start the worker
-if (require.main === module) {
-    const worker = new MovieUploadWorker();
-    worker.start();
+// CLI interface
+async function main() {
+    const worker = new MediaWorker();
+
+    try {
+        await worker.login();
+
+        const args = process.argv.slice(2);
+        const command = args[0];
+
+        switch (command) {
+            case "upload-media":
+                if (!args[1]) {
+                    console.error("Please provide file path");
+                    process.exit(1);
+                }
+                await worker.uploadMedia(args[1]);
+                break;
+
+            case "list-media":
+                const mediaFiles = await worker.listFiles(
+                    CONFIG.mediaBucketName
+                );
+                console.log("Media files:");
+                mediaFiles.forEach((file) => console.log(`  ${file.Key}`));
+                break;
+
+            case "list-playlists":
+                const playlistFiles = await worker.listFiles(
+                    CONFIG.playlistBucketName
+                );
+                console.log("Playlist files:");
+                playlistFiles.forEach((file) => console.log(`  ${file.Key}`));
+                break;
+
+            case "check-ffmpeg":
+                await worker.checkFFmpeg();
+                break;
+
+            case "status":
+                console.log("Worker authenticated successfully!");
+                console.log("Identity ID:", worker.credentials?.identityId);
+                console.log("Username:", worker.tokens?.username);
+                console.log(
+                    "Token expires:",
+                    new Date(worker.tokens?.expiresAt)
+                );
+                console.log(
+                    "HLS Uploader:",
+                    worker.hlsUploader ? "✅ Ready" : "❌ Not initialized"
+                );
+                break;
+
+            default:
+                console.log("Available commands:");
+                console.log(
+                    "  upload-media <file-path>    - Upload a media file (video files use HLS)"
+                );
+                console.log(
+                    "  list-media                  - List uploaded media files"
+                );
+                console.log(
+                    "  list-playlists              - List uploaded playlist files"
+                );
+                console.log(
+                    "  check-ffmpeg                - Check if FFmpeg is available"
+                );
+                console.log(
+                    "  status                      - Show authentication status"
+                );
+                break;
+        }
+    } catch (error) {
+        console.error("Error:", error.message);
+        process.exit(1);
+    }
 }
 
-module.exports = { VideoHLSUploader, MovieUploadWorker };
+// Run if called directly
+if (require.main === module) {
+    main();
+}
+
+module.exports = MediaWorker;
