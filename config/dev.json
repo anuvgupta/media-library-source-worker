@@ -7,6 +7,7 @@
     "playlistBucketName": "media-library-playlist-738123590383-dev",
     "libraryBucketName": "media-library-library-738123590383-dev",
     "websiteDomain": "media-dev.anuv.me",
+    "apiDomain": "media-api-dev.anuv.me",
     "mediaUploadPath": "media",
     "playlistUploadPath": "playlist",
     "libraryUploadPath": "library",

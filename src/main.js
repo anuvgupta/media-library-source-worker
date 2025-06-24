@@ -3,6 +3,15 @@
 // main.js
 // Worker script for uploading media to S3 using Cognito authentication
 
+const fs = require("fs");
+const path = require("path");
+const https = require("https");
+const readline = require("readline");
+const { spawn } = require("child_process");
+const { promisify } = require("util");
+const { randomUUID } = require("crypto");
+
+const aws4 = require("aws4");
 const {
     SQSClient,
     ReceiveMessageCommand,
@@ -23,12 +32,12 @@ const {
     ListObjectsV2Command,
 } = require("@aws-sdk/client-s3");
 const { Upload } = require("@aws-sdk/lib-storage");
-const fs = require("fs");
-const path = require("path");
-const readline = require("readline");
-const { spawn } = require("child_process");
-const { promisify } = require("util");
-const { randomUUID } = require("crypto");
+// const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+// const {
+//     DynamoDBDocumentClient,
+//     GetCommand,
+//     PutCommand,
+// } = require("@aws-sdk/lib-dynamodb");
 
 const { VideoHLSUploader } = require("./VideoHLSUploader/index.js");
 
@@ -48,10 +57,11 @@ class MediaWorker {
             region: CONFIG.region,
         });
         this.s3 = null; // Will be initialized after authentication
+        this.sqs = null; // Will be initialized after authentication
+        // this.dynamodb = null; // Will be initialized after authentication
+        this.hlsUploader = null; // Will be initialized after S3 client is ready
         this.tokens = this.loadTokens();
         this.credentials = null;
-        this.hlsUploader = null; // Will be initialized after S3 client is ready
-        this.sqs = null;
         this.isWorkerRunning = false;
         this.pollingErrorRetry = 0;
         this.pollingErrorRetryLimit = 3;
@@ -215,15 +225,6 @@ class MediaWorker {
                     Key: s3Key,
                     Body: jsonContent,
                     ContentType: "application/json",
-                    // // Optional: Add metadata to track when this was generated
-                    // Metadata: {
-                    //     "generated-at": new Date().toISOString(),
-                    //     "movie-count": Object.values(libraryData)
-                    //         .reduce((total, movies) => total + movies.length, 0)
-                    //         .toString(),
-                    //     "collection-count":
-                    //         Object.keys(libraryData).length.toString(),
-                    // },
                 },
             });
 
@@ -241,6 +242,9 @@ class MediaWorker {
             console.log(
                 `📊 Uploaded library contains ${movieCount} movies across ${collectionCount} collections`
             );
+
+            // Create or update DynamoDB record via API
+            await this.updateLibraryAccessViaAPI(movieCount, collectionCount);
         } catch (s3Error) {
             console.error(
                 `❌ Failed to upload library data to S3:`,
@@ -254,6 +258,148 @@ class MediaWorker {
 
         console.log("✅ Library refresh completed");
         return libraryData;
+    }
+
+    // Method to update library access via API
+    async updateLibraryAccessViaAPI(movieCount, collectionCount) {
+        if (!this.credentials?.identityId) {
+            throw new Error("Authentication credentials not available");
+        }
+
+        try {
+            console.log("📝 Updating LibraryAccess record via API...");
+
+            const ownerIdentityId = this.getIdentityId();
+            const currentTime = new Date().toISOString();
+
+            // Prepare the request body
+            const requestBody = {
+                movieCount: movieCount,
+                collectionCount: collectionCount,
+                lastScanAt: currentTime,
+            };
+
+            // Make API call to update library access
+            const apiEndpoint = `libraries/${ownerIdentityId}/access`;
+
+            const response = await this.makeAuthenticatedAPIRequest(
+                "POST",
+                apiEndpoint,
+                requestBody
+            );
+
+            if (response.ok) {
+                const result = await response.json();
+                console.log(
+                    `✅ LibraryAccess record updated successfully via API`
+                );
+                console.log(
+                    `📊 Record contains ${movieCount} movies across ${collectionCount} collections`
+                );
+            } else {
+                const errorText = await response.text();
+                throw new Error(
+                    `API request failed: ${response.status} ${errorText}`
+                );
+            }
+        } catch (error) {
+            console.error(
+                "❌ Failed to update LibraryAccess record via API:",
+                error.message
+            );
+            // Don't throw here - the library refresh was successful even if API update fails
+            console.log(
+                "⚠️  Library refresh completed successfully, but LibraryAccess update failed"
+            );
+        }
+    }
+
+    // Method to make authenticated API requests with AWS4 signing
+    async makeAuthenticatedAPIRequest(method, endpoint, body) {
+        try {
+            const apiHost = CONFIG.apiDomain;
+            const region = CONFIG.region;
+
+            const requestOptions = {
+                host: apiHost,
+                method: method,
+                path: `/${endpoint}`,
+                service: "execute-api",
+                region: region,
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(body),
+            };
+
+            // Sign the request with AWS4
+            const signedRequest = aws4.sign(requestOptions, {
+                accessKeyId: this.credentials.accessKeyId,
+                secretAccessKey: this.credentials.secretAccessKey,
+                sessionToken: this.credentials.sessionToken,
+            });
+
+            console.log(
+                `Making API request to: https://${signedRequest.host}${signedRequest.path}`
+            );
+
+            // Make the request using Node.js https module
+            return new Promise((resolve, reject) => {
+                const req = https.request(
+                    {
+                        hostname: signedRequest.host,
+                        port: 443,
+                        path: signedRequest.path,
+                        method: signedRequest.method,
+                        headers: signedRequest.headers,
+                    },
+                    (res) => {
+                        let data = "";
+
+                        res.on("data", (chunk) => {
+                            data += chunk;
+                        });
+
+                        res.on("end", () => {
+                            // Create a response object similar to fetch API
+                            const response = {
+                                ok:
+                                    res.statusCode >= 200 &&
+                                    res.statusCode < 300,
+                                status: res.statusCode,
+                                statusText: res.statusMessage,
+                                headers: res.headers,
+                                json: async () => {
+                                    try {
+                                        return JSON.parse(data);
+                                    } catch (e) {
+                                        throw new Error(
+                                            "Response is not valid JSON"
+                                        );
+                                    }
+                                },
+                                text: async () => data,
+                            };
+                            resolve(response);
+                        });
+                    }
+                );
+
+                req.on("error", (error) => {
+                    reject(error);
+                });
+
+                // Write the request body
+                if (signedRequest.body) {
+                    req.write(signedRequest.body);
+                }
+
+                req.end();
+            });
+        } catch (error) {
+            console.error("Error making authenticated API request:", error);
+            throw error;
+        }
     }
 
     // Handle upload-movie command
@@ -612,6 +758,17 @@ class MediaWorker {
                     sessionToken: credentials.sessionToken,
                 },
             });
+
+            // // Initialize DynamoDB client with the credentials
+            // const dynamodbClient = new DynamoDBClient({
+            //     region: CONFIG.region,
+            //     credentials: {
+            //         accessKeyId: credentials.accessKeyId,
+            //         secretAccessKey: credentials.secretAccessKey,
+            //         sessionToken: credentials.sessionToken,
+            //     },
+            // });
+            // this.dynamodb = DynamoDBDocumentClient.from(dynamodbClient);
 
             // Initialize HLS uploader after S3 client is ready
             this.initializeHLSUploader();
