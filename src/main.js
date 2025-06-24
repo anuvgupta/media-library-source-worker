@@ -53,6 +53,8 @@ class MediaWorker {
         this.hlsUploader = null; // Will be initialized after S3 client is ready
         this.sqs = null;
         this.isWorkerRunning = false;
+        this.pollingErrorRetry = 0;
+        this.pollingErrorRetryLimit = 3;
     }
 
     // Initialize HLS uploader after S3 client is ready
@@ -91,11 +93,19 @@ class MediaWorker {
                     setTimeout(resolve, CONFIG.sqsPollingInterval)
                 );
             } catch (error) {
+                this.pollingErrorRetry += 1;
                 console.error("Worker polling error:", error.message);
-                // Continue polling even if there's an error
-                await new Promise((resolve) =>
-                    setTimeout(resolve, CONFIG.sqsPollingInterval)
-                );
+                if (this.pollingErrorRetry > this.pollingErrorRetryLimit) {
+                    this.pollingErrorRetry = 0;
+                    console.error("Attempting login");
+                    await this.login();
+                } else {
+                    console.error("Retrying polling");
+                    // Continue polling even if there's an error
+                    await new Promise((resolve) =>
+                        setTimeout(resolve, CONFIG.sqsPollingInterval)
+                    );
+                }
             }
         }
     }
