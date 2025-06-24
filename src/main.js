@@ -131,9 +131,9 @@ class MediaWorker {
         try {
             const body = JSON.parse(message.Body);
 
-            const userId = body.userId;
+            const identityId = body.identityId;
 
-            if (userId != this.getUserId()) {
+            if (identityId != this.getIdentityId()) {
                 return;
             }
 
@@ -189,8 +189,9 @@ class MediaWorker {
                 throw new Error("Not authenticated - cannot upload to S3");
             }
 
-            const ownerId = this.getUserId();
-            const s3Key = `${CONFIG.libraryUploadPath}/${ownerId}/library.json`;
+            const s3Key = `${
+                CONFIG.libraryUploadPath
+            }/${this.getIdentityId()}/library.json`;
             const jsonContent = JSON.stringify(libraryData, null, 2);
 
             console.log(
@@ -345,8 +346,85 @@ class MediaWorker {
         });
     }
 
+    // Add this method to decode JWT token and extract sub
+    decodeJWT(token) {
+        try {
+            // JWT tokens have 3 parts separated by dots: header.payload.signature
+            const parts = token.split(".");
+            if (parts.length !== 3) {
+                throw new Error("Invalid JWT token format");
+            }
+
+            // Decode the payload (second part)
+            const payload = parts[1];
+            // Add padding if needed for base64 decoding
+            const paddedPayload =
+                payload + "=".repeat((4 - (payload.length % 4)) % 4);
+            const decodedPayload = Buffer.from(
+                paddedPayload,
+                "base64"
+            ).toString("utf8");
+
+            return JSON.parse(decodedPayload);
+        } catch (error) {
+            throw new Error(`Failed to decode JWT token: ${error.message}`);
+        }
+    }
+
+    getUsername() {
+        // First check if we have the username stored from authentication
+        if (this.tokens?.username) {
+            return this.tokens.username;
+        }
+
+        // If not stored directly, try to extract from the ID token
+        if (this.tokens?.idToken) {
+            try {
+                const payload = this.decodeJWT(this.tokens.idToken);
+                // Cognito typically stores username in 'cognito:username' or 'username' field
+                return (
+                    payload["cognito:username"] ||
+                    payload.username ||
+                    payload.email
+                );
+            } catch (error) {
+                console.warn(
+                    "Failed to extract username from token:",
+                    error.message
+                );
+            }
+        }
+
+        // If we can't get username from tokens, return null or throw error
+        throw new Error(
+            "No username available - user not authenticated or username not found in token"
+        );
+    }
+
     getUserId() {
-        return this.credentials.identityId;
+        if (!this.tokens?.idToken) {
+            throw new Error("No ID token available - user not authenticated");
+        }
+
+        try {
+            const payload = this.decodeJWT(this.tokens.idToken);
+            return payload.sub; // This is the actual user ID from Cognito User Pool
+        } catch (error) {
+            console.error(
+                "Failed to extract user ID from token:",
+                error.message
+            );
+            // Fallback to identityId if token parsing fails
+            if (this.credentials?.identityId) {
+                console.warn("Using identityId as fallback for user ID");
+                return this.credentials.identityId;
+            }
+            throw new Error("Unable to determine user ID");
+        }
+    }
+
+    getIdentityId() {
+        return this.credentials?.identityId ?? null;
     }
 
     // Authenticate with username/password
@@ -529,6 +607,8 @@ class MediaWorker {
             this.initializeHLSUploader();
 
             console.log("AWS credentials obtained successfully!");
+            console.log("Username:", this.getUsername());
+            console.log("User ID:", this.getUserId());
             console.log("Identity ID:", identityId);
 
             return credentials;
@@ -1023,8 +1103,7 @@ class MediaWorker {
             console.log(`Starting HLS upload for video: ${filePath}`);
 
             // Set the upload paths for the user's folder
-            const ownerId = this.getUserId();
-            const uploadSubpath = ownerId;
+            const uploadSubpath = this.getIdentityId();
             const fileName = path.basename(filePath, path.extname(filePath));
             const movieId = fileName;
 
@@ -1043,9 +1122,10 @@ class MediaWorker {
         } else {
             // For non-video files, use direct S3 upload
             console.log(`Uploading non-video file: ${filePath}`);
-            const ownerId = this.credentials.identityId;
+            const uploadSubpath = this.getIdentityId();
             const fileName = path.basename(filePath);
-            const key = `media/${ownerId}/files/${fileName}`;
+            const movieId = fileName;
+            const key = `${CONFIG.mediaUploadPath}/${uploadSubpath}/files/${movieId}`;
 
             return await this.uploadFile(filePath, CONFIG.mediaBucketName, key);
         }
@@ -1060,7 +1140,7 @@ class MediaWorker {
         try {
             const command = new ListObjectsV2Command({
                 Bucket: bucketName,
-                Prefix: `media/${this.credentials.identityId}/`,
+                Prefix: `${CONFIG.mediaUploadPath}/${this.credentials.identityId}/`,
             });
 
             const result = await this.s3.send(command);
