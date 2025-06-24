@@ -21,6 +21,8 @@ const { Upload } = require("@aws-sdk/lib-storage");
 const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
+const { spawn } = require("child_process");
+const { promisify } = require("util");
 
 const { VideoHLSUploader } = require("./VideoHLSUploader/index.js");
 
@@ -379,8 +381,355 @@ class MediaWorker {
     // Check if file is a video that should use HLS upload
     isVideoFile(filePath) {
         const ext = path.extname(filePath).toLowerCase();
-        const videoExtensions = [".mp4", ".mkv", ".avi", ".mov", ".m4v"];
+        const videoExtensions = [
+            ".mp4",
+            ".mkv",
+            ".avi",
+            ".mov",
+            ".m4v",
+            ".wmv",
+            ".flv",
+            ".webm",
+        ];
         return videoExtensions.includes(ext);
+    }
+
+    // Check if ffprobe is available
+    async checkFFprobeAvailable() {
+        return new Promise((resolve) => {
+            const ffprobe = spawn("ffprobe", ["-version"]);
+            ffprobe.on("close", (code) => {
+                resolve(code === 0);
+            });
+            ffprobe.on("error", () => {
+                resolve(false);
+            });
+        });
+    }
+
+    // Get video metadata using ffprobe
+    async getVideoMetadata(filePath) {
+        return new Promise((resolve, reject) => {
+            console.log(
+                `        Running ffprobe on: ${path.basename(filePath)}`
+            );
+
+            const ffprobe = spawn("ffprobe", [
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                filePath,
+            ]);
+
+            let stdout = "";
+            let stderr = "";
+
+            ffprobe.stdout.on("data", (data) => {
+                stdout += data;
+            });
+
+            ffprobe.stderr.on("data", (data) => {
+                stderr += data;
+            });
+
+            ffprobe.on("close", (code) => {
+                if (code === 0) {
+                    try {
+                        const metadata = JSON.parse(stdout);
+                        console.log(
+                            `        ffprobe successful for ${path.basename(
+                                filePath
+                            )}`
+                        );
+                        resolve(metadata);
+                    } catch (error) {
+                        reject(
+                            new Error(
+                                `Failed to parse ffprobe output: ${error.message}`
+                            )
+                        );
+                    }
+                } else {
+                    reject(
+                        new Error(`ffprobe failed with code ${code}: ${stderr}`)
+                    );
+                }
+            });
+
+            ffprobe.on("error", (error) => {
+                reject(new Error(`Failed to run ffprobe: ${error.message}`));
+            });
+        });
+    }
+
+    // Extract quality from filename if ffprobe fails
+    extractQualityFromFilename(filename) {
+        const name = filename.toLowerCase();
+        if (
+            name.includes("2160p") ||
+            name.includes("4k") ||
+            name.includes("uhd")
+        )
+            return "4K";
+        if (name.includes("1440p")) return "1440p";
+        if (name.includes("1080p") || name.includes("fhd")) return "1080p";
+        if (name.includes("720p") || name.includes("hd")) return "720p";
+        if (name.includes("480p")) return "480p";
+        if (name.includes("360p")) return "360p";
+        return "Unknown";
+    }
+
+    // Extract quality from video metadata
+    extractQuality(streams) {
+        const videoStream = streams.find(
+            (stream) => stream.codec_type === "video"
+        );
+        if (!videoStream) {
+            return "Unknown";
+        }
+
+        const height = videoStream.height;
+        if (height >= 2160) return "4K";
+        if (height >= 1440) return "1440p";
+        if (height >= 1080) return "1080p";
+        if (height >= 720) return "720p";
+        if (height >= 480) return "480p";
+        return `${height}p`;
+    }
+
+    // Format file size to human readable format
+    formatFileSize(bytes) {
+        const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
+        if (bytes === 0) return "0 Bytes";
+        const i = Math.floor(Math.log(bytes) / Math.log(1024));
+        return (
+            Math.round((bytes / Math.pow(1024, i)) * 100) / 100 + " " + sizes[i]
+        );
+    }
+
+    // Format runtime from seconds to readable format
+    formatRuntime(seconds) {
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+
+        if (hours > 0) {
+            return `${hours}h ${minutes}m`;
+        } else {
+            return `${minutes}m`;
+        }
+    }
+
+    // Parse movie name and year from folder name
+    parseMovieNameAndYear(folderName) {
+        // Match pattern: "Movie Name (YYYY)"
+        const match = folderName.match(/^(.+?)\s*\((\d{4})\)$/);
+        if (match) {
+            return {
+                name: match[1].trim(),
+                year: parseInt(match[2]),
+            };
+        }
+
+        // Fallback: return the folder name as-is and null year
+        return {
+            name: folderName,
+            year: null,
+        };
+    }
+
+    // Scan library for movie collections and metadata
+    async scanLibrary(libraryPath) {
+        console.log(`Scanning library at: ${libraryPath}`);
+
+        if (!fs.existsSync(libraryPath)) {
+            throw new Error(`Library path does not exist: ${libraryPath}`);
+        }
+
+        // Check if ffprobe is available
+        const ffprobeAvailable = await this.checkFFprobeAvailable();
+        if (!ffprobeAvailable) {
+            console.log(
+                "⚠️  ffprobe not found - will extract basic info from filenames only"
+            );
+        } else {
+            console.log("✅ ffprobe found - will extract detailed metadata");
+        }
+
+        const collections = {};
+
+        try {
+            // Get all collection folders (first level subfolders)
+            const collectionFolders = fs
+                .readdirSync(libraryPath, { withFileTypes: true })
+                .filter((dirent) => dirent.isDirectory())
+                .map((dirent) => dirent.name);
+
+            console.log(`Found ${collectionFolders.length} collections`);
+
+            for (const collectionName of collectionFolders) {
+                console.log(`\nScanning collection: ${collectionName}`);
+                const collectionPath = path.join(libraryPath, collectionName);
+                collections[collectionName] = [];
+
+                // Get all movie folders (second level subfolders)
+                const movieFolders = fs
+                    .readdirSync(collectionPath, { withFileTypes: true })
+                    .filter((dirent) => dirent.isDirectory())
+                    .map((dirent) => dirent.name);
+
+                console.log(
+                    `  Found ${movieFolders.length} movies in ${collectionName}`
+                );
+
+                for (const movieFolderName of movieFolders) {
+                    const moviePath = path.join(
+                        collectionPath,
+                        movieFolderName
+                    );
+                    const { name, year } =
+                        this.parseMovieNameAndYear(movieFolderName);
+
+                    console.log(
+                        `    Processing: ${name} (${year || "Unknown Year"})`
+                    );
+
+                    try {
+                        // Find video files in the movie folder
+                        const files = fs
+                            .readdirSync(moviePath, { withFileTypes: true })
+                            .filter((dirent) => dirent.isFile())
+                            .map((dirent) => dirent.name);
+
+                        let videoFile = null;
+                        let videoFilePath = null;
+
+                        // Look for video files
+                        for (const fileName of files) {
+                            const filePath = path.join(moviePath, fileName);
+                            if (this.isVideoFile(filePath)) {
+                                videoFile = fileName;
+                                videoFilePath = filePath;
+                                break; // Use the first video file found
+                            }
+                        }
+
+                        if (!videoFile) {
+                            console.log(
+                                `      Warning: No video file found in ${movieFolderName}`
+                            );
+                            collections[collectionName].push({
+                                name,
+                                year,
+                                runtime: "Unknown",
+                                fileSize: "Unknown",
+                                quality: "Unknown",
+                                error: "No video file found",
+                            });
+                            continue;
+                        }
+
+                        console.log(`      Found video file: ${videoFile}`);
+
+                        // Get file size
+                        const stats = fs.statSync(videoFilePath);
+                        const fileSize = this.formatFileSize(stats.size);
+
+                        // Initialize metadata
+                        let runtime = "Unknown";
+                        let quality = "Unknown";
+
+                        // Try to get metadata using ffprobe if available
+                        if (ffprobeAvailable) {
+                            try {
+                                const metadata = await this.getVideoMetadata(
+                                    videoFilePath
+                                );
+
+                                // Extract runtime
+                                if (
+                                    metadata.format &&
+                                    metadata.format.duration
+                                ) {
+                                    const durationSeconds = parseFloat(
+                                        metadata.format.duration
+                                    );
+                                    runtime =
+                                        this.formatRuntime(durationSeconds);
+                                    console.log(`        Duration: ${runtime}`);
+                                }
+
+                                // Extract quality
+                                if (metadata.streams) {
+                                    quality = this.extractQuality(
+                                        metadata.streams
+                                    );
+                                    console.log(`        Quality: ${quality}`);
+                                }
+                            } catch (metadataError) {
+                                console.log(
+                                    `        ffprobe failed: ${metadataError.message}`
+                                );
+                                console.log(
+                                    `        Falling back to filename-based quality detection`
+                                );
+                                quality =
+                                    this.extractQualityFromFilename(videoFile);
+                            }
+                        } else {
+                            // Fallback to filename-based quality detection
+                            quality =
+                                this.extractQualityFromFilename(videoFile);
+                            console.log(
+                                `        Quality (from filename): ${quality}`
+                            );
+                        }
+
+                        console.log(
+                            `      Final metadata: ${runtime}, ${quality}, ${fileSize}`
+                        );
+
+                        // Add movie to collection
+                        collections[collectionName].push({
+                            name,
+                            year,
+                            runtime,
+                            fileSize,
+                            quality,
+                            videoFile,
+                            path: videoFilePath,
+                        });
+                    } catch (movieError) {
+                        console.log(
+                            `      Error processing ${movieFolderName}: ${movieError.message}`
+                        );
+                        collections[collectionName].push({
+                            name,
+                            year,
+                            runtime: "Unknown",
+                            fileSize: "Unknown",
+                            quality: "Unknown",
+                            error: movieError.message,
+                        });
+                    }
+                }
+            }
+
+            console.log(
+                `\nLibrary scan complete. Found ${
+                    Object.keys(collections).length
+                } collections with ${Object.values(collections).reduce(
+                    (total, movies) => total + movies.length,
+                    0
+                )} movies total.`
+            );
+            return collections;
+        } catch (error) {
+            console.error(`Error scanning library: ${error.message}`);
+            throw error;
+        }
     }
 
     // Main authentication flow
@@ -535,10 +884,11 @@ async function main() {
     const worker = new MediaWorker();
 
     try {
-        await worker.login();
-
         const args = process.argv.slice(2);
         const command = args[0];
+
+        // For all other commands, authenticate first
+        await worker.login();
 
         switch (command) {
             case "upload-media":
@@ -583,6 +933,26 @@ async function main() {
                 );
                 break;
 
+            case "scan-library":
+                if (!args[1]) {
+                    console.error("Please provide library path");
+                    process.exit(1);
+                }
+                const libraryData = await worker.scanLibrary(args[1]);
+
+                // Option to save to file
+                if (args[2] === "--save" && args[3]) {
+                    fs.writeFileSync(
+                        args[3],
+                        JSON.stringify(libraryData, null, 2)
+                    );
+                    console.log(`Library data saved to: ${args[3]}`);
+                } else {
+                    console.log("\nLibrary scan results:");
+                    console.log(JSON.stringify(libraryData, null, 2));
+                }
+                break;
+
             default:
                 console.log("Available commands:");
                 console.log(
@@ -596,6 +966,9 @@ async function main() {
                 );
                 console.log(
                     "  check-ffmpeg                - Check if FFmpeg is available"
+                );
+                console.log(
+                    "  scan-library <path> [--save <output-file>] - Scan movie library and extract metadata"
                 );
                 console.log(
                     "  status                      - Show authentication status"
