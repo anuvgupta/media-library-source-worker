@@ -9,20 +9,4 @@ if [ -f .env ]; then
   export $(cat .env | xargs)
 fi
 
-# Validate required environment variables
-if [ -z "$AWS_ACCESS_KEY_ID" ]; then
-  echo "Error: AWS_ACCESS_KEY_ID not set"
-  exit 1
-fi
-
-if [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
-  echo "Error: AWS_SECRET_ACCESS_KEY not set"
-  exit 1
-fi
-
-if [ -z "$AWS_REGION" ]; then
-  echo "Error: AWS_REGION not set"
-  exit 1
-fi
-
 npm run start

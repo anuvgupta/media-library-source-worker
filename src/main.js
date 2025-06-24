@@ -81,8 +81,8 @@ class MediaWorker {
 
     // Start worker mode - polls SQS indefinitely
     async startWorkerMode() {
-        console.log("🚀 Starting worker mode...");
         this.isWorkerRunning = true;
+        console.log("🚀 Worker started...");
 
         while (this.isWorkerRunning) {
             try {
