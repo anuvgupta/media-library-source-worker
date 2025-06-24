@@ -4,6 +4,11 @@
 // Worker script for uploading media to S3 using Cognito authentication
 
 const {
+    SQSClient,
+    ReceiveMessageCommand,
+    DeleteMessageCommand,
+} = require("@aws-sdk/client-sqs");
+const {
     CognitoIdentityProviderClient,
     InitiateAuthCommand,
 } = require("@aws-sdk/client-cognito-identity-provider");
@@ -23,6 +28,7 @@ const path = require("path");
 const readline = require("readline");
 const { spawn } = require("child_process");
 const { promisify } = require("util");
+const { randomUUID } = require("crypto");
 
 const { VideoHLSUploader } = require("./VideoHLSUploader/index.js");
 
@@ -45,6 +51,8 @@ class MediaWorker {
         this.tokens = this.loadTokens();
         this.credentials = null;
         this.hlsUploader = null; // Will be initialized after S3 client is ready
+        this.sqs = null;
+        this.isWorkerRunning = false;
     }
 
     // Initialize HLS uploader after S3 client is ready
@@ -69,6 +77,205 @@ class MediaWorker {
         });
 
         console.log("✅ HLS Uploader initialized");
+    }
+
+    // Start worker mode - polls SQS indefinitely
+    async startWorkerMode() {
+        console.log("🚀 Starting worker mode...");
+        this.isWorkerRunning = true;
+
+        while (this.isWorkerRunning) {
+            try {
+                await this.pollSQS();
+                await new Promise((resolve) =>
+                    setTimeout(resolve, CONFIG.sqsPollingInterval)
+                );
+            } catch (error) {
+                console.error("Worker polling error:", error.message);
+                // Continue polling even if there's an error
+                await new Promise((resolve) =>
+                    setTimeout(resolve, CONFIG.sqsPollingInterval)
+                );
+            }
+        }
+    }
+
+    // Stop worker mode
+    stopWorkerMode() {
+        console.log("🛑 Stopping worker mode...");
+        this.isWorkerRunning = false;
+    }
+
+    // Poll SQS for messages
+    async pollSQS() {
+        const command = new ReceiveMessageCommand({
+            QueueUrl: CONFIG.sqsQueueUrl,
+            MaxNumberOfMessages: CONFIG.maxReceiveCount,
+            WaitTimeSeconds: 10, // Long polling
+            MessageAttributeNames: ["All"],
+        });
+
+        const result = await this.sqs.send(command);
+
+        if (result.Messages && result.Messages.length > 0) {
+            // console.log(`📨 Received ${result.Messages.length} message(s)`);
+
+            for (const message of result.Messages) {
+                await this.processMessage(message);
+            }
+        }
+    }
+
+    // Process individual SQS message
+    async processMessage(message) {
+        try {
+            const body = JSON.parse(message.Body);
+
+            const userId = body.userId;
+
+            if (userId != this.getUserId()) {
+                return;
+            }
+
+            console.log(`Processing message: ${message.MessageId}`);
+
+            const command = body.command;
+
+            switch (command) {
+                case "refresh-library":
+                    await this.handleRefreshLibrary(body);
+                    break;
+
+                case "upload-movie":
+                    await this.handleUploadMovie(body);
+                    break;
+
+                default:
+                    console.log(`Unknown command: ${command}`);
+                    break;
+            }
+
+            // Delete message after successful processing
+            await this.deleteMessage(message.ReceiptHandle);
+            console.log(
+                `✅ Message processed and deleted: ${message.MessageId}`
+            );
+        } catch (error) {
+            console.error(
+                `❌ Error processing message ${message.MessageId}:`,
+                error.message
+            );
+            // Message will remain in queue and be retried
+        }
+    }
+
+    // Handle refresh-library command
+    async handleRefreshLibrary(messageBody) {
+        console.log("🔄 Handling refresh-library command");
+
+        const libraryPath = CONFIG.libraryPath; // Use from config
+        const outputFile = `${libraryPath}/media-library.json`;
+
+        const libraryData = await this.scanLibrary(libraryPath);
+
+        if (outputFile) {
+            fs.writeFileSync(outputFile, JSON.stringify(libraryData, null, 2));
+            console.log(`Library data saved to: ${outputFile}`);
+        }
+
+        // Upload to S3
+        try {
+            if (!this.credentials?.identityId) {
+                throw new Error("Not authenticated - cannot upload to S3");
+            }
+
+            const ownerId = this.getUserId();
+            const s3Key = `${CONFIG.libraryUploadPath}/${ownerId}/library.json`;
+            const jsonContent = JSON.stringify(libraryData, null, 2);
+
+            console.log(
+                `📤 Uploading library data to S3: s3://${CONFIG.libraryBucketName}/${s3Key}`
+            );
+
+            const upload = new Upload({
+                client: this.s3,
+                params: {
+                    Bucket: CONFIG.libraryBucketName,
+                    Key: s3Key,
+                    Body: jsonContent,
+                    ContentType: "application/json",
+                    // // Optional: Add metadata to track when this was generated
+                    // Metadata: {
+                    //     "generated-at": new Date().toISOString(),
+                    //     "movie-count": Object.values(libraryData)
+                    //         .reduce((total, movies) => total + movies.length, 0)
+                    //         .toString(),
+                    //     "collection-count":
+                    //         Object.keys(libraryData).length.toString(),
+                    // },
+                },
+            });
+
+            const uploadResult = await upload.done();
+            console.log(
+                `✅ Library data uploaded successfully to: ${uploadResult.Location}`
+            );
+
+            // Log some stats about what was uploaded
+            const movieCount = Object.values(libraryData).reduce(
+                (total, movies) => total + movies.length,
+                0
+            );
+            const collectionCount = Object.keys(libraryData).length;
+            console.log(
+                `📊 Uploaded library contains ${movieCount} movies across ${collectionCount} collections`
+            );
+        } catch (s3Error) {
+            console.error(
+                `❌ Failed to upload library data to S3:`,
+                s3Error.message
+            );
+            // Don't throw here - we still want to return the library data even if S3 upload fails
+            console.log(
+                "📝 Library scan completed successfully, but S3 upload failed"
+            );
+        }
+
+        console.log("✅ Library refresh completed");
+        return libraryData;
+    }
+
+    // Handle upload-movie command
+    async handleUploadMovie(messageBody) {
+        console.log("🎬 Handling upload-movie command");
+
+        const moviePath = messageBody.moviePath;
+        const movieId = messageBody.movieId;
+
+        if (!moviePath) {
+            throw new Error("moviePath is required for upload-movie command");
+        }
+
+        if (!fs.existsSync(moviePath)) {
+            throw new Error(`Movie file not found: ${moviePath}`);
+        }
+
+        const uploadResult = await this.uploadMedia(moviePath);
+        console.log(
+            `✅ Movie upload completed: ${movieId || path.basename(moviePath)}`
+        );
+
+        return uploadResult;
+    }
+
+    // Delete processed message from SQS
+    async deleteMessage(receiptHandle) {
+        const command = new DeleteMessageCommand({
+            QueueUrl: CONFIG.sqsQueueUrl,
+            ReceiptHandle: receiptHandle,
+        });
+
+        await this.sqs.send(command);
     }
 
     // Load stored tokens from file
@@ -136,6 +343,10 @@ class MediaWorker {
                 });
             }
         });
+    }
+
+    getUserId() {
+        return this.credentials.identityId;
     }
 
     // Authenticate with username/password
@@ -296,6 +507,16 @@ class MediaWorker {
 
             // Initialize S3 client with the credentials
             this.s3 = new S3Client({
+                region: CONFIG.region,
+                credentials: {
+                    accessKeyId: credentials.accessKeyId,
+                    secretAccessKey: credentials.secretAccessKey,
+                    sessionToken: credentials.sessionToken,
+                },
+            });
+
+            // Initialize SQS client with the credentials
+            this.sqs = new SQSClient({
                 region: CONFIG.region,
                 credentials: {
                     accessKeyId: credentials.accessKeyId,
@@ -491,13 +712,47 @@ class MediaWorker {
             return "Unknown";
         }
 
-        const height = videoStream.height;
-        if (height >= 2160) return "4K";
-        if (height >= 1440) return "1440p";
-        if (height >= 1080) return "1080p";
-        if (height >= 720) return "720p";
-        if (height >= 480) return "480p";
-        return `${height}p`;
+        const width = videoStream.width || 0;
+        const height = videoStream.height || 0;
+
+        // For quality determination, use the larger dimension (usually width for widescreen content)
+        // or use width as primary indicator with height as secondary
+
+        // 4K/UHD detection (3840x2160 or similar)
+        if (width >= 3840 || height >= 2160) {
+            return "4K";
+        }
+
+        // 1440p/QHD detection (2560x1440 or similar)
+        if (width >= 2560 || height >= 1440) {
+            return "1440p";
+        }
+
+        // 1080p/FHD detection - key change here
+        // Standard 1080p: 1920x1080
+        // Cinematic 1080p: 1920x800, 1920x804, etc.
+        // Ultra-wide 1080p: 2560x1080
+        if (width >= 1920 || (height >= 1080 && width >= 1440)) {
+            return "1080p";
+        }
+
+        // 720p/HD detection (1280x720 or similar)
+        if (width >= 1280 || (height >= 720 && width >= 960)) {
+            return "720p";
+        }
+
+        // 480p/SD detection
+        if (width >= 640 || height >= 480) {
+            return "480p";
+        }
+
+        // 360p detection
+        if (width >= 480 || height >= 360) {
+            return "360p";
+        }
+
+        // Return actual resolution for anything else
+        return `${width}x${height}`;
     }
 
     // Format file size to human readable format
@@ -699,7 +954,6 @@ class MediaWorker {
                             fileSize,
                             quality,
                             videoFile,
-                            path: videoFilePath,
                         });
                     } catch (movieError) {
                         console.log(
@@ -769,7 +1023,7 @@ class MediaWorker {
             console.log(`Starting HLS upload for video: ${filePath}`);
 
             // Set the upload paths for the user's folder
-            const ownerId = this.credentials.identityId;
+            const ownerId = this.getUserId();
             const uploadSubpath = ownerId;
             const fileName = path.basename(filePath, path.extname(filePath));
             const movieId = fileName;
@@ -899,25 +1153,25 @@ async function main() {
                 await worker.uploadMedia(args[1]);
                 break;
 
-            case "list-media":
-                const mediaFiles = await worker.listFiles(
-                    CONFIG.mediaBucketName
-                );
-                console.log("Media files:");
-                mediaFiles.forEach((file) => console.log(`  ${file.Key}`));
-                break;
+            // case "list-media":
+            //     const mediaFiles = await worker.listFiles(
+            //         CONFIG.mediaBucketName
+            //     );
+            //     console.log("Media files:");
+            //     mediaFiles.forEach((file) => console.log(`  ${file.Key}`));
+            //     break;
 
-            case "list-playlists":
-                const playlistFiles = await worker.listFiles(
-                    CONFIG.playlistBucketName
-                );
-                console.log("Playlist files:");
-                playlistFiles.forEach((file) => console.log(`  ${file.Key}`));
-                break;
+            // case "list-playlists":
+            //     const playlistFiles = await worker.listFiles(
+            //         CONFIG.playlistBucketName
+            //     );
+            //     console.log("Playlist files:");
+            //     playlistFiles.forEach((file) => console.log(`  ${file.Key}`));
+            //     break;
 
-            case "check-ffmpeg":
-                await worker.checkFFmpeg();
-                break;
+            // case "check-ffmpeg":
+            //     await worker.checkFFmpeg();
+            //     break;
 
             case "status":
                 console.log("Worker authenticated successfully!");
@@ -953,22 +1207,40 @@ async function main() {
                 }
                 break;
 
+            case "worker":
+                console.log("Starting worker mode (Ctrl+C to stop)");
+
+                // Handle graceful shutdown
+                process.on("SIGINT", () => {
+                    console.log(
+                        "\nReceived SIGINT, shutting down gracefully..."
+                    );
+                    worker.stopWorkerMode();
+                    process.exit(0);
+                });
+
+                await worker.startWorkerMode();
+                break;
+
             default:
                 console.log("Available commands:");
                 console.log(
                     "  upload-media <file-path>    - Upload a media file (video files use HLS)"
                 );
-                console.log(
-                    "  list-media                  - List uploaded media files"
-                );
-                console.log(
-                    "  list-playlists              - List uploaded playlist files"
-                );
-                console.log(
-                    "  check-ffmpeg                - Check if FFmpeg is available"
-                );
+                // console.log(
+                //     "  list-media                  - List uploaded media files"
+                // );
+                // console.log(
+                //     "  list-playlists              - List uploaded playlist files"
+                // );
+                // console.log(
+                //     "  check-ffmpeg                - Check if FFmpeg is available"
+                // );
                 console.log(
                     "  scan-library <path> [--save <output-file>] - Scan movie library and extract metadata"
+                );
+                console.log(
+                    "  worker                      - Start worker mode (polls SQS for commands)"
                 );
                 console.log(
                     "  status                      - Show authentication status"
