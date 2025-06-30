@@ -14,5 +14,6 @@
     "sqsQueueUrl": "https://sqs.us-east-1.amazonaws.com/738123590383/media-worker-commands-dev",
     "sqsPollingInterval": 5000,
     "maxReceiveCount": 10,
+    "moviePreSignedUrlExpiration": 7200,
     "libraryPath": "/Users/anuv/Downloads/TEST_DRIVE/Library/Film/Live"
 }
