@@ -418,7 +418,7 @@ class MediaWorker {
             throw new Error(`Movie file not found: ${moviePath}`);
         }
 
-        const uploadResult = await this.uploadMedia(moviePath);
+        const uploadResult = await this.uploadMedia(moviePath, movieId);
         console.log(
             `✅ Movie upload completed: ${movieId || path.basename(moviePath)}`
         );
@@ -1253,7 +1253,7 @@ class MediaWorker {
     }
 
     // Upload media file with HLS conversion for videos
-    async uploadMedia(filePath) {
+    async uploadMedia(filePath, fileId) {
         if (!this.credentials?.identityId) {
             throw new Error("Not authenticated");
         }
@@ -1273,15 +1273,14 @@ class MediaWorker {
             // Set the upload paths for the user's folder
             const uploadSubpath = this.getIdentityId();
             const fileName = path.basename(filePath, path.extname(filePath));
-            const movieId = fileName;
 
             try {
                 const uploadSession = await this.hlsUploader.uploadMovie(
                     filePath,
-                    movieId,
+                    fileId,
                     uploadSubpath
                 );
-                console.log(`✅ HLS upload completed for movie: ${movieId}`);
+                console.log(`✅ HLS upload completed for file: ${fileId}`);
                 return uploadSession;
             } catch (error) {
                 console.error(`❌ HLS upload failed:`, error);
@@ -1291,9 +1290,7 @@ class MediaWorker {
             // For non-video files, use direct S3 upload
             console.log(`Uploading non-video file: ${filePath}`);
             const uploadSubpath = this.getIdentityId();
-            const fileName = path.basename(filePath);
-            const movieId = fileName;
-            const key = `${CONFIG.mediaUploadPath}/${uploadSubpath}/files/${movieId}`;
+            const key = `${CONFIG.mediaUploadPath}/${uploadSubpath}/files/${fileId}`;
 
             return await this.uploadFile(filePath, CONFIG.mediaBucketName, key);
         }
@@ -1398,7 +1395,11 @@ async function main() {
                     console.error("Please provide file path");
                     process.exit(1);
                 }
-                await worker.uploadMedia(args[1]);
+                if (!args[2]) {
+                    console.error("Please provide movie id");
+                    process.exit(1);
+                }
+                await worker.uploadMedia(args[1], args[2]);
                 break;
 
             // case "list-media":
