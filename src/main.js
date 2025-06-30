@@ -405,12 +405,13 @@ class MediaWorker {
     // Handle upload-movie command
     async handleUploadMovie(messageBody) {
         console.log("🎬 Handling upload-movie command");
-
-        const moviePath = messageBody.moviePath;
+        const libraryPath = CONFIG.libraryPath; // Use from config
         const movieId = messageBody.movieId;
+        const moviePathInLibrary = atob(messageBody.movieId);
+        const moviePath = `${libraryPath}/${moviePathInLibrary}`;
 
-        if (!moviePath) {
-            throw new Error("moviePath is required for upload-movie command");
+        if (!movieId) {
+            throw new Error("movieId is required for upload-movie command");
         }
 
         if (!fs.existsSync(moviePath)) {
