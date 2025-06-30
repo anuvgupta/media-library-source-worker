@@ -81,11 +81,14 @@ class MediaWorker {
             playlistBucketName: CONFIG.playlistBucketName,
             mediaUploadPath: CONFIG.mediaUploadPath,
             playlistUploadPath: CONFIG.playlistUploadPath,
+            moviePreSignedUrlExpiration: CONFIG.moviePreSignedUrlExpiration,
             websiteDomain: CONFIG.websiteDomain || "your-domain.com",
             segmentDuration: 10,
             concurrentUploads: 3,
             prioritySegments: 5,
             tempDir: "./temp",
+            makeAuthenticatedAPIRequest:
+                this.makeAuthenticatedAPIRequest.bind(this),
         });
 
         console.log("✅ HLS Uploader initialized");

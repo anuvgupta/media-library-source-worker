@@ -34,6 +34,7 @@ class VideoHLSUploader {
         this.mediaUploadPath = options.mediaUploadPath;
         this.playlistUploadPath = options.playlistUploadPath;
         this.websiteDomain = options.websiteDomain;
+        this.makeAuthenticatedAPIRequest = options.makeAuthenticatedAPIRequest;
 
         // Optional parameters
         this.segmentDuration = options.segmentDuration || 10; // 10 second segments
@@ -552,52 +553,93 @@ class VideoHLSUploader {
         }
     }
 
-    async uploadPartialPlaylist(movieId, segmentCount, segmentInfo) {
-        // Generate HLS playlist for available segments
-        let playlist = "#EXTM3U\n";
-        playlist += "#EXT-X-VERSION:3\n";
-        playlist += `#EXT-X-TARGETDURATION:${this.segmentDuration}\n`;
-        playlist += "#EXT-X-MEDIA-SEQUENCE:0\n";
+    // Replace uploadPartialPlaylist method
+    async uploadPartialPlaylist(
+        movieId,
+        segmentCount,
+        segmentInfo,
+        presignedUrls
+    ) {
+        // Create simple template playlist (no pre-signed URLs)
+        let templatePlaylist = "#EXTM3U\n";
+        templatePlaylist += "#EXT-X-VERSION:3\n";
+        templatePlaylist += `#EXT-X-TARGETDURATION:${this.segmentDuration}\n`;
+        templatePlaylist += "#EXT-X-MEDIA-SEQUENCE:0\n";
 
-        // Add segments that are available
-        for (let i = 0; i < segmentCount; i++) {
+        // Add all segments with just filenames
+        for (let i = 0; i < segmentInfo.totalSegments; i++) {
             const filename = segmentInfo.segmentFiles[i];
-            playlist += `#EXTINF:${this.segmentDuration}.0,\n`;
-            playlist += `https://${this.websiteDomain}/${this.mediaUploadPath}/${this.uploadSubpath}/movie/${movieId}/segments/${filename}\n`;
+            templatePlaylist += `#EXTINF:${this.segmentDuration}.0,\n`;
+            templatePlaylist += `${filename}\n`;
         }
 
-        // Only add end tag if all segments are uploaded
-        const isComplete = segmentCount >= segmentInfo.totalSegments;
-        if (isComplete) {
-            playlist += "#EXT-X-ENDLIST\n";
+        // Always add end tag to template
+        templatePlaylist += "#EXT-X-ENDLIST\n";
+
+        // Upload template playlist (only once, when first called)
+        if (
+            segmentCount ===
+            Math.min(this.prioritySegments, segmentInfo.totalSegments)
+        ) {
+            const templateParams = {
+                Bucket: this.playlistBucketName,
+                Key: `${this.playlistUploadPath}/${this.uploadSubpath}/movie/${movieId}/playlist-template.m3u8`,
+                Body: templatePlaylist,
+                ContentType: "application/vnd.apple.mpegurl",
+            };
+
+            const upload = new Upload({
+                client: this.s3Client,
+                params: templateParams,
+            });
+
+            await upload.done();
+            console.log(`📝 Template playlist uploaded`);
         }
 
-        const playlistParams = {
-            Bucket: this.playlistBucketName,
-            Key: `${this.playlistUploadPath}/${this.uploadSubpath}/movie/${movieId}/playlist.m3u8`,
-            Body: playlist,
-            ContentType: "application/vnd.apple.mpegurl",
-            // // CRITICAL: Cache control for CDN compatibility
-            // CacheControl: isComplete
-            //     ? "public, max-age=3600" // Cache final playlist for 1 hour
-            //     : "no-cache, no-store, must-revalidate", // Never cache partial playlists
-            // Metadata: {
-            //     movieId: movieId,
-            //     segmentCount: segmentCount.toString(),
-            //     totalSegments: segmentInfo.totalSegments.toString(),
-            //     isComplete: isComplete.toString(),
-            // },
-        };
-
-        const upload = new Upload({
-            client: this.s3Client,
-            params: playlistParams,
-        });
-
-        await upload.done();
-        console.log(
-            `📝 Playlist updated (${segmentCount}/${segmentInfo.totalSegments} segments)`
+        // Call API to process template into real playlist
+        await this.processPlaylistViaAPI(
+            movieId,
+            segmentCount,
+            segmentInfo.totalSegments
         );
+    }
+
+    async processPlaylistViaAPI(movieId, segmentCount, totalSegments) {
+        try {
+            console.log(
+                `🔄 Processing playlist via API (${segmentCount}/${totalSegments} segments)`
+            );
+
+            const isComplete = segmentCount >= totalSegments;
+            const apiEndpoint = `libraries/${this.uploadSubpath}/movies/${movieId}/playlist/process`;
+
+            const requestBody = {
+                segmentCount,
+                totalSegments,
+                isComplete,
+            };
+
+            const response = await this.makeAuthenticatedAPIRequest(
+                "POST",
+                apiEndpoint,
+                requestBody
+            );
+
+            if (response.ok) {
+                const result = await response.json();
+                console.log(`✅ Playlist processed successfully via API`);
+                return result;
+            } else {
+                const errorText = await response.text();
+                throw new Error(
+                    `API request failed: ${response.status} ${errorText}`
+                );
+            }
+        } catch (error) {
+            console.error("❌ Failed to process playlist via API:", error);
+            throw error;
+        }
     }
 
     async uploadMasterPlaylist(movieId, segmentInfo) {
