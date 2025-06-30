@@ -65,7 +65,10 @@ class MediaWorker {
         this.isWorkerRunning = false;
         this.pollingErrorRetry = 0;
         this.pollingErrorRetryLimit = 3;
-        this.activeUploads = new Map();
+        this.maxConcurrentUploads = CONFIG.maxConcurrentUploads || 3;
+        this.activeUploads = new Map(); // Track active uploads
+        this.uploadQueue = []; // Queue for pending uploads
+        this.processingUploads = 0; // Current number of processing uploads
     }
 
     // Initialize HLS uploader after S3 client is ready
@@ -143,11 +146,18 @@ class MediaWorker {
         const result = await this.sqs.send(command);
 
         if (result.Messages && result.Messages.length > 0) {
-            // console.log(`📨 Received ${result.Messages.length} message(s)`);
+            // Process all messages concurrently (but uploads will be controlled)
+            const messagePromises = result.Messages.map((message) =>
+                this.processMessage(message).catch((error) => {
+                    console.error(
+                        `Error processing message ${message.MessageId}:`,
+                        error.message
+                    );
+                    // Don't rethrow - we want to continue processing other messages
+                })
+            );
 
-            for (const message of result.Messages) {
-                await this.processMessage(message);
-            }
+            await Promise.all(messagePromises);
         }
     }
 
@@ -155,7 +165,6 @@ class MediaWorker {
     async processMessage(message) {
         try {
             const body = JSON.parse(message.Body);
-
             const identityId = body.identityId;
 
             if (identityId != this.getIdentityId()) {
@@ -163,7 +172,6 @@ class MediaWorker {
             }
 
             console.log(`Processing message: ${message.MessageId}`);
-
             const command = body.command;
 
             switch (command) {
@@ -172,15 +180,16 @@ class MediaWorker {
                     break;
 
                 case "upload-movie":
-                    await this.handleUploadMovie(body);
-                    break;
+                    // Handle upload-movie asynchronously
+                    await this.queueUploadMovie(body, message);
+                    return; // Don't delete message yet - will be deleted after upload
 
                 default:
                     console.log(`Unknown command: ${command}`);
                     break;
             }
 
-            // Delete message after successful processing
+            // Delete message after successful processing (for non-upload commands)
             await this.deleteMessage(message.ReceiptHandle);
             console.log(
                 `✅ Message processed and deleted: ${message.MessageId}`
@@ -1347,6 +1356,208 @@ class MediaWorker {
         }
     }
 
+    // New method to queue and manage concurrent uploads
+    async queueUploadMovie(messageBody, message) {
+        const movieId = messageBody.movieId;
+
+        if (!movieId) {
+            throw new Error("movieId is required for upload-movie command");
+        }
+
+        // Check if upload is already in progress or queued
+        if (this.activeUploads.has(movieId)) {
+            console.log(
+                `🔄 Upload already in progress for movie: ${movieId}, discarding duplicate request`
+            );
+            await this.deleteMessage(message.ReceiptHandle);
+            return;
+        }
+
+        // Add to active uploads tracking
+        this.activeUploads.set(movieId, {
+            status: "queued",
+            queueTime: Date.now(),
+            messageBody,
+            message,
+        });
+
+        // If we're under the concurrency limit, start immediately
+        if (this.processingUploads < this.maxConcurrentUploads) {
+            this.startUpload(movieId);
+        } else {
+            // Add to queue
+            this.uploadQueue.push(movieId);
+            console.log(
+                `📋 Movie ${movieId} queued for upload (${this.uploadQueue.length} in queue)`
+            );
+        }
+    }
+
+    // New method to start an upload
+    async startUpload(movieId) {
+        if (!this.activeUploads.has(movieId)) {
+            console.error(`❌ Movie ${movieId} not found in active uploads`);
+            return;
+        }
+
+        const uploadInfo = this.activeUploads.get(movieId);
+        this.processingUploads++;
+
+        console.log(
+            `🚀 Starting upload for movie: ${movieId} (${this.processingUploads}/${this.maxConcurrentUploads} slots used)`
+        );
+
+        try {
+            // Update status
+            uploadInfo.status = "uploading";
+            uploadInfo.startTime = Date.now();
+
+            // Start the actual upload (don't await - run in background)
+            this.handleUploadMovieAsync(
+                movieId,
+                uploadInfo.messageBody,
+                uploadInfo.message
+            )
+                .then(() => {
+                    console.log(`✅ Upload completed for movie: ${movieId}`);
+                })
+                .catch((error) => {
+                    console.error(
+                        `❌ Upload failed for movie: ${movieId}`,
+                        error
+                    );
+                })
+                .finally(() => {
+                    // Cleanup and start next upload
+                    this.finishUpload(movieId);
+                });
+        } catch (error) {
+            console.error(
+                `❌ Failed to start upload for movie: ${movieId}`,
+                error
+            );
+            this.finishUpload(movieId);
+        }
+    }
+
+    // New async upload handler
+    async handleUploadMovieAsync(movieId, messageBody, message) {
+        try {
+            const libraryPath = CONFIG.libraryPath;
+            const moviePathInLibrary = atob(messageBody.movieId);
+            const moviePath = `${libraryPath}/${moviePathInLibrary}`;
+
+            if (!fs.existsSync(moviePath)) {
+                throw new Error(`Movie file not found: ${moviePath}`);
+            }
+
+            const uploadResult = await this.uploadMedia(moviePath, movieId);
+
+            // Delete SQS message after successful upload
+            await this.deleteMessage(message.ReceiptHandle);
+            console.log(`✅ Message deleted for completed upload: ${movieId}`);
+
+            return uploadResult;
+        } catch (error) {
+            console.error(`❌ Upload failed for movie: ${movieId}`, error);
+            // Don't delete message on failure - let it retry
+            throw error;
+        }
+    }
+
+    // New method to clean up after upload completion
+    finishUpload(movieId) {
+        // Remove from active uploads
+        this.activeUploads.delete(movieId);
+        this.processingUploads--;
+
+        console.log(
+            `🔄 Upload slot freed (${this.processingUploads}/${this.maxConcurrentUploads} slots used)`
+        );
+
+        // Start next upload from queue if available
+        if (
+            this.uploadQueue.length > 0 &&
+            this.processingUploads < this.maxConcurrentUploads
+        ) {
+            const nextMovieId = this.uploadQueue.shift();
+            console.log(
+                `📤 Starting queued upload: ${nextMovieId} (${this.uploadQueue.length} remaining in queue)`
+            );
+            this.startUpload(nextMovieId);
+        }
+    }
+
+    // New method to get upload status
+    getUploadStatus() {
+        const activeUploads = Array.from(this.activeUploads.entries()).map(
+            ([movieId, info]) => ({
+                movieId,
+                status: info.status,
+                queueTime: info.queueTime,
+                startTime: info.startTime,
+                duration: info.startTime ? Date.now() - info.startTime : null,
+            })
+        );
+
+        return {
+            processing: this.processingUploads,
+            maxConcurrent: this.maxConcurrentUploads,
+            queued: this.uploadQueue.length,
+            activeUploads,
+        };
+    }
+
+    // Enhanced status command
+    async showStatus() {
+        console.log("Worker authenticated successfully!");
+        console.log("Identity ID:", this.credentials?.identityId);
+        console.log("Username:", this.tokens?.username);
+        console.log("Token expires:", new Date(this.tokens?.expiresAt));
+        console.log(
+            "HLS Uploader:",
+            this.hlsUploader ? "✅ Ready" : "❌ Not initialized"
+        );
+
+        // Show upload status
+        const uploadStatus = this.getUploadStatus();
+        console.log("\n📊 Upload Status:");
+        console.log(
+            `  Processing: ${uploadStatus.processing}/${uploadStatus.maxConcurrent}`
+        );
+        console.log(`  Queued: ${uploadStatus.queued}`);
+
+        if (uploadStatus.activeUploads.length > 0) {
+            console.log("  Active uploads:");
+            uploadStatus.activeUploads.forEach((upload) => {
+                const duration = upload.duration
+                    ? `${Math.round(upload.duration / 1000)}s`
+                    : "N/A";
+                console.log(
+                    `    ${upload.movieId}: ${upload.status} (${duration})`
+                );
+            });
+        }
+    }
+
+    // Modified stopWorkerMode to handle active uploads
+    stopWorkerMode() {
+        console.log("🛑 Stopping worker mode...");
+        console.log(
+            `⏳ Waiting for ${this.processingUploads} active uploads to complete...`
+        );
+
+        this.isWorkerRunning = false;
+
+        // You might want to add a graceful shutdown that waits for uploads
+        // For now, uploads will continue in the background
+        if (this.processingUploads > 0) {
+            console.log(
+                "💡 Tip: Active uploads will continue. Monitor logs for completion."
+            );
+        }
+    }
+
     // Check FFmpeg availability
     async checkFFmpeg() {
         if (!this.hlsUploader) {
@@ -1454,17 +1665,13 @@ async function main() {
             //     break;
 
             case "status":
-                console.log("Worker authenticated successfully!");
-                console.log("Identity ID:", worker.credentials?.identityId);
-                console.log("Username:", worker.tokens?.username);
-                console.log(
-                    "Token expires:",
-                    new Date(worker.tokens?.expiresAt)
-                );
-                console.log(
-                    "HLS Uploader:",
-                    worker.hlsUploader ? "✅ Ready" : "❌ Not initialized"
-                );
+                await worker.showStatus();
+                break;
+
+            case "upload-status":
+                const uploadStatus = worker.getUploadStatus();
+                console.log("📊 Current Upload Status:");
+                console.log(JSON.stringify(uploadStatus, null, 2));
                 break;
 
             case "scan-library":
