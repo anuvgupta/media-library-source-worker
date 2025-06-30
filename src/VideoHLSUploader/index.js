@@ -5,6 +5,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { promisify } = require("util");
 const { Upload } = require("@aws-sdk/lib-storage");
+const { ListObjectsV2Command } = require("@aws-sdk/client-s3");
 
 class VideoHLSUploader {
     constructor(options = {}) {
@@ -42,6 +43,8 @@ class VideoHLSUploader {
         this.prioritySegments = options.prioritySegments || 5; // Upload first N segments immediately
         this.tempDir = options.tempDir || "./temp";
         this.supportedFormats = [".mp4", ".mkv", ".avi", ".mov", ".m4v"];
+        this.skipExistingSegments = options.skipExistingSegments !== false; // Default to true
+        this.existingSegments = new Set(); // Track which segments already exist
         // this.testFiles = options.testFiles || [
         //     "./tst/test-movie.mp4",
         //     "./tst/test-movie.mkv",
@@ -78,6 +81,12 @@ class VideoHLSUploader {
                 `Total size: ${(totalSize / 1024 / 1024).toFixed(2)} MB`
             );
 
+            // Check for existing segments BEFORE conversion
+            this.existingSegments = await this.checkExistingSegments(
+                movieId,
+                uploadSubpath
+            );
+
             // Analyze video file
             const videoInfo = await this.analyzeVideoFile(filePath);
             console.log(
@@ -88,7 +97,8 @@ class VideoHLSUploader {
             const uploadSession = {
                 movieId,
                 totalSegments: 0,
-                uploadedSegments: 0,
+                uploadedSegments: this.existingSegments.size, // Start with existing segments
+                skippedSegments: this.existingSegments.size,
                 totalSize,
                 startTime: Date.now(),
                 status: "converting",
@@ -102,6 +112,13 @@ class VideoHLSUploader {
                 videoInfo
             );
             uploadSession.totalSegments = segmentInfo.totalSegments;
+
+            // Log resume information
+            if (this.existingSegments.size > 0) {
+                console.log(
+                    `🔄 Resuming upload: ${this.existingSegments.size}/${segmentInfo.totalSegments} segments already exist`
+                );
+            }
 
             console.log(`Total segments: ${segmentInfo.totalSegments}`);
             console.log(`Segment duration: ${this.segmentDuration}s`);
@@ -119,9 +136,6 @@ class VideoHLSUploader {
                 uploadSession,
                 segmentInfo
             );
-
-            // Step 4: Upload master playlist
-            await this.uploadMasterPlaylist(movieId, segmentInfo);
 
             // Cleanup temp files
             await this.cleanup(movieId);
@@ -506,6 +520,27 @@ class VideoHLSUploader {
         outputDir
     ) {
         try {
+            // Check if segment already exists
+            if (this.existingSegments.has(filename)) {
+                console.log(
+                    `⏭️  Skipping existing segment ${segmentIndex + 1}/${
+                        uploadSession.totalSegments
+                    }: ${filename}`
+                );
+
+                // Don't increment uploadedSegments since we're not actually uploading
+                const progress = (
+                    (uploadSession.uploadedSegments /
+                        uploadSession.totalSegments) *
+                    100
+                ).toFixed(1);
+                console.log(
+                    `📊 Progress: ${progress}% (${uploadSession.uploadedSegments}/${uploadSession.totalSegments}, ${uploadSession.skippedSegments} skipped)`
+                );
+
+                return; // Skip upload
+            }
+
             const segmentPath = path.join(outputDir, filename);
             const segmentBuffer = fs.readFileSync(segmentPath);
 
@@ -573,8 +608,8 @@ class VideoHLSUploader {
             templatePlaylist += `${filename}\n`;
         }
 
-        // Always add end tag to template
-        templatePlaylist += "#EXT-X-ENDLIST\n";
+        // Don't add end tag to template
+        // DONT: templatePlaylist += "#EXT-X-ENDLIST\n";
 
         // Upload template playlist (only once, when first called)
         if (
@@ -642,45 +677,9 @@ class VideoHLSUploader {
         }
     }
 
-    async uploadMasterPlaylist(movieId, segmentInfo) {
-        // Generate final HLS playlist
-        let playlist = "#EXTM3U\n";
-        playlist += "#EXT-X-VERSION:3\n";
-        playlist += `#EXT-X-TARGETDURATION:${this.segmentDuration}\n`;
-        playlist += "#EXT-X-MEDIA-SEQUENCE:0\n";
-
-        for (let i = 0; i < segmentInfo.totalSegments; i++) {
-            const filename = segmentInfo.segmentFiles[i];
-            playlist += `#EXTINF:${this.segmentDuration}.0,\n`;
-            playlist += `https://${this.websiteDomain}/${this.mediaUploadPath}/${this.uploadSubpath}/movie/${movieId}/segments/${filename}\n`;
-        }
-
-        playlist += "#EXT-X-ENDLIST\n";
-
-        const playlistParams = {
-            Bucket: this.playlistBucketName,
-            Key: `${this.playlistUploadPath}/${this.uploadSubpath}/movie/${movieId}/playlist.m3u8`,
-            Body: playlist,
-            ContentType: "application/vnd.apple.mpegurl",
-            // // Final playlist can be cached longer
-            // CacheControl: "public, max-age=86400", // Cache for 24 hours
-            // Metadata: {
-            //     movieId: movieId,
-            //     totalSegments: segmentInfo.totalSegments.toString(),
-            //     isComplete: "true",
-            // },
-        };
-
-        const upload = new Upload({
-            client: this.s3Client,
-            params: playlistParams,
-        });
-
-        await upload.done();
-        console.log(`📝 Final playlist uploaded for movie: ${movieId}`);
-    }
-
     async updateUploadStatus(movieId, uploadSession) {
+        const actualUploaded =
+            uploadSession.uploadedSegments - uploadSession.skippedSegments;
         const progress = (
             (uploadSession.uploadedSegments / uploadSession.totalSegments) *
             100
@@ -690,8 +689,72 @@ class VideoHLSUploader {
         );
 
         console.log(
-            `📊 Status Update - Movie: ${movieId}, Progress: ${progress}%, Elapsed: ${elapsed}s, Status: ${uploadSession.status}`
+            `📊 Status Update - Movie: ${movieId}, Progress: ${progress}%, Uploaded: ${actualUploaded}, Skipped: ${uploadSession.skippedSegments}, Elapsed: ${elapsed}s, Status: ${uploadSession.status}`
         );
+    }
+
+    // Add method to check existing segments
+    async checkExistingSegments(movieId, uploadSubpath) {
+        if (!this.skipExistingSegments) {
+            console.log(
+                "⏭️  Segment skipping disabled, will upload all segments"
+            );
+            return new Set();
+        }
+
+        try {
+            console.log("🔍 Checking for existing segments...");
+
+            const listParams = {
+                Bucket: this.mediaBucketName,
+                Prefix: `${this.mediaUploadPath}/${uploadSubpath}/movie/${movieId}/segments/`,
+                MaxKeys: 3000, // Should be enough for most movies
+            };
+
+            const listResult = await this.s3Client.send(
+                new ListObjectsV2Command(listParams)
+            );
+
+            const existingSegments = new Set();
+
+            if (listResult.Contents && listResult.Contents.length > 0) {
+                for (const object of listResult.Contents) {
+                    // Extract filename from the key
+                    const filename = object.Key.split("/").pop();
+                    if (
+                        filename &&
+                        filename.startsWith("segment_") &&
+                        filename.endsWith(".ts")
+                    ) {
+                        existingSegments.add(filename);
+                    }
+                }
+
+                console.log(
+                    `📋 Found ${existingSegments.size} existing segments to skip`
+                );
+                if (existingSegments.size > 0) {
+                    const sortedSegments = Array.from(existingSegments).sort();
+                    console.log(
+                        `   First: ${sortedSegments[0]}, Last: ${
+                            sortedSegments[sortedSegments.length - 1]
+                        }`
+                    );
+                }
+            } else {
+                console.log(
+                    "📋 No existing segments found, starting fresh upload"
+                );
+            }
+
+            return existingSegments;
+        } catch (error) {
+            console.warn(
+                "⚠️  Failed to check existing segments, will upload all:",
+                error.message
+            );
+            return new Set();
+        }
     }
 
     async cleanup(movieId) {

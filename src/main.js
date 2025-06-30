@@ -65,6 +65,7 @@ class MediaWorker {
         this.isWorkerRunning = false;
         this.pollingErrorRetry = 0;
         this.pollingErrorRetryLimit = 3;
+        this.activeUploads = new Map();
     }
 
     // Initialize HLS uploader after S3 client is ready
@@ -87,6 +88,7 @@ class MediaWorker {
             concurrentUploads: 3,
             prioritySegments: 5,
             tempDir: "./temp",
+            skipExistingSegments: true,
             makeAuthenticatedAPIRequest:
                 this.makeAuthenticatedAPIRequest.bind(this),
         });
@@ -408,25 +410,51 @@ class MediaWorker {
     // Handle upload-movie command
     async handleUploadMovie(messageBody) {
         console.log("🎬 Handling upload-movie command");
-        const libraryPath = CONFIG.libraryPath; // Use from config
         const movieId = messageBody.movieId;
-        const moviePathInLibrary = atob(messageBody.movieId);
-        const moviePath = `${libraryPath}/${moviePathInLibrary}`;
 
         if (!movieId) {
             throw new Error("movieId is required for upload-movie command");
         }
 
+        // Check if upload is already in progress
+        if (this.activeUploads.has(movieId)) {
+            console.log(
+                `🔄 Upload already in progress for movie: ${movieId}, discarding duplicate request`
+            );
+            return { status: "duplicate_request_discarded", movieId };
+        }
+
+        const libraryPath = CONFIG.libraryPath; // Use from config
+        const moviePathInLibrary = atob(messageBody.movieId);
+        const moviePath = `${libraryPath}/${moviePathInLibrary}`;
+
         if (!fs.existsSync(moviePath)) {
             throw new Error(`Movie file not found: ${moviePath}`);
         }
 
-        const uploadResult = await this.uploadMedia(moviePath, movieId);
-        console.log(
-            `✅ Movie upload completed: ${movieId || path.basename(moviePath)}`
-        );
+        try {
+            // Mark upload as active
+            this.activeUploads.set(movieId, {
+                status: "starting",
+                startTime: Date.now(),
+                moviePath: moviePath,
+            });
 
-        return uploadResult;
+            const uploadResult = await this.uploadMedia(moviePath, movieId);
+
+            console.log(
+                `✅ Movie upload completed: ${
+                    movieId || path.basename(moviePath)
+                }`
+            );
+            return uploadResult;
+        } catch (error) {
+            console.error(`❌ Movie upload failed: ${movieId}`, error);
+            throw error;
+        } finally {
+            // Always clean up the active upload tracking
+            this.activeUploads.delete(movieId);
+        }
     }
 
     // Delete processed message from SQS
