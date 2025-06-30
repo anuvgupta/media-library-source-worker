@@ -15,5 +15,7 @@
     "sqsPollingInterval": 5000,
     "maxReceiveCount": 10,
     "moviePreSignedUrlExpiration": 7200,
+    "concurrentUploads": 8,
+    "prioritySegments": 8,
     "libraryPath": "/Users/anuv/Downloads/TEST_DRIVE/Library/Film/Live"
 }

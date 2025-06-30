@@ -84,9 +84,9 @@ class MediaWorker {
             playlistUploadPath: CONFIG.playlistUploadPath,
             moviePreSignedUrlExpiration: CONFIG.moviePreSignedUrlExpiration,
             websiteDomain: CONFIG.websiteDomain || "your-domain.com",
-            segmentDuration: 10,
-            concurrentUploads: 3,
-            prioritySegments: 5,
+            segmentDuration: 20,
+            concurrentUploads: CONFIG.concurrentUploads,
+            prioritySegments: CONFIG.prioritySegments,
             tempDir: "./temp",
             skipExistingSegments: true,
             makeAuthenticatedAPIRequest:
