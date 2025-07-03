@@ -531,6 +531,14 @@ class VideoHLSUploader {
             Math.min(this.prioritySegments, segmentInfo.totalSegments)
         );
 
+        // Check how many priority segments will actually be uploaded (not skipped)
+        let actualPriorityUploads = 0;
+        for (const filename of priorityFiles) {
+            if (!this.existingSegments.has(filename)) {
+                actualPriorityUploads++;
+            }
+        }
+
         const priorityPromises = priorityFiles.map((filename, index) =>
             this.uploadSegment(
                 movieId,
@@ -543,14 +551,24 @@ class VideoHLSUploader {
 
         await Promise.all(priorityPromises);
 
-        // Upload initial playlist for priority segments
-        await this.uploadPartialPlaylist(
-            movieId,
-            priorityFiles.length,
-            segmentInfo
-        );
+        // Only upload playlist if we actually uploaded new priority segments
+        if (actualPriorityUploads > 0) {
+            // Upload initial playlist for priority segments
+            await this.uploadPartialPlaylist(
+                movieId,
+                priorityFiles.length,
+                segmentInfo
+            );
+            console.log(
+                `📝 Priority playlist uploaded (${actualPriorityUploads} new segments)`
+            );
+        } else {
+            console.log(
+                `⏭️  Skipping priority playlist upload (all ${priorityFiles.length} priority segments already existed)`
+            );
+        }
 
-        console.log(`✅ Priority segments uploaded. Ready for playback!`);
+        console.log(`✅ Priority segments processed. Ready for playback!`);
 
         uploadSession.status = "ready_for_playback";
         await this.updateUploadStatus(movieId, uploadSession);
