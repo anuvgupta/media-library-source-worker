@@ -105,13 +105,60 @@ class VideoHLSUploader {
                 videoInfo,
             };
 
+            const outputDir = path.join(this.tempDir, movieId);
+            const playlistPath = path.join(outputDir, "playlist.m3u8");
+            const segmentInfoPath = path.join(outputDir, "segment-info.json");
+
+            let segmentInfo;
+            let skipConversion = false;
+
+            if (
+                fs.existsSync(outputDir) &&
+                fs.existsSync(playlistPath) &&
+                fs.existsSync(segmentInfoPath)
+            ) {
+                try {
+                    // Load existing segment info
+                    const savedSegmentInfo = JSON.parse(
+                        fs.readFileSync(segmentInfoPath, "utf8")
+                    );
+
+                    // Verify all segment files still exist
+                    const segmentFiles = savedSegmentInfo.segmentFiles || [];
+                    const allSegmentsExist = segmentFiles.every((filename) =>
+                        fs.existsSync(path.join(outputDir, filename))
+                    );
+
+                    if (allSegmentsExist && segmentFiles.length > 0) {
+                        console.log(
+                            `✅ Found existing conversion with ${segmentFiles.length} segments, skipping conversion`
+                        );
+                        segmentInfo = savedSegmentInfo;
+                        skipConversion = true;
+                        uploadSession.totalSegments = segmentInfo.totalSegments;
+                    } else {
+                        console.log(
+                            `⚠️ Existing conversion incomplete, will reconvert`
+                        );
+                    }
+                } catch (error) {
+                    console.log(
+                        `⚠️ Failed to load existing conversion info: ${error.message}`
+                    );
+                }
+            }
+
             // Step 1: Convert to HLS segments
-            const segmentInfo = await this.convertToHLS(
-                filePath,
-                movieId,
-                videoInfo
-            );
-            uploadSession.totalSegments = segmentInfo.totalSegments;
+            if (!skipConversion) {
+                segmentInfo = await this.convertToHLS(
+                    filePath,
+                    movieId,
+                    videoInfo
+                );
+                uploadSession.totalSegments = segmentInfo.totalSegments;
+            } else {
+                uploadSession.status = "using_existing_conversion";
+            }
 
             // Log resume information
             if (this.existingSegments.size > 0) {
@@ -351,28 +398,73 @@ class VideoHLSUploader {
             let stderr = "";
 
             ffmpeg.stderr.on("data", (data) => {
-                stderr += data.toString();
-                // Parse progress from FFmpeg output
-                const progressMatch = stderr.match(
-                    /time=(\d{2}):(\d{2}):(\d{2})/
-                );
-                if (progressMatch) {
-                    const hours = parseInt(progressMatch[1]);
-                    const minutes = parseInt(progressMatch[2]);
-                    const seconds = parseInt(progressMatch[3]);
-                    const currentTime = hours * 3600 + minutes * 60 + seconds;
-                    const totalTime = videoInfo.duration;
-                    const progress =
-                        totalTime > 0
-                            ? ((currentTime / totalTime) * 100).toFixed(1)
-                            : 0;
-                    process.stdout.write(
-                        `\r🔄 Converting... ${Math.floor(currentTime / 60)}:${(
-                            currentTime % 60
-                        )
-                            .toString()
-                            .padStart(2, "0")} (${progress}%)`
-                    );
+                const chunk = data.toString();
+                stderr += chunk;
+
+                // Parse multiple progress indicators from FFmpeg output
+                const lines = chunk.split("\n");
+
+                for (const line of lines) {
+                    // Look for progress lines that contain time= and speed=
+                    if (line.includes("time=") && line.includes("speed=")) {
+                        const timeMatch = line.match(
+                            /time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})/
+                        );
+                        const speedMatch = line.match(/speed=\s*(\d+\.?\d*)/);
+                        const bitrateMatch = line.match(
+                            /bitrate=\s*(\d+\.?\d*)/
+                        );
+
+                        if (timeMatch) {
+                            const hours = parseInt(timeMatch[1]);
+                            const minutes = parseInt(timeMatch[2]);
+                            const seconds = parseInt(timeMatch[3]);
+                            const milliseconds = parseInt(timeMatch[4]);
+                            const currentTime =
+                                hours * 3600 +
+                                minutes * 60 +
+                                seconds +
+                                milliseconds / 100;
+                            const totalTime = videoInfo.duration;
+
+                            if (totalTime > 0) {
+                                const progress = (
+                                    (currentTime / totalTime) *
+                                    100
+                                ).toFixed(1);
+                                const remainingTime = totalTime - currentTime;
+                                const speed = speedMatch
+                                    ? parseFloat(speedMatch[1])
+                                    : 1;
+                                const eta =
+                                    speed > 0 ? remainingTime / speed : 0;
+
+                                const formatTime = (seconds) => {
+                                    const mins = Math.floor(seconds / 60);
+                                    const secs = Math.floor(seconds % 60);
+                                    return `${mins}:${secs
+                                        .toString()
+                                        .padStart(2, "0")}`;
+                                };
+
+                                const bitrate = bitrateMatch
+                                    ? `${bitrateMatch[1]}kbps`
+                                    : "N/A";
+                                const speedStr =
+                                    speed > 0 ? `${speed.toFixed(1)}x` : "N/A";
+
+                                process.stdout.write(
+                                    `\r🔄 Converting... ${formatTime(
+                                        currentTime
+                                    )}/${formatTime(
+                                        totalTime
+                                    )} (${progress}%) | Speed: ${speedStr} | ETA: ${formatTime(
+                                        eta
+                                    )} | Bitrate: ${bitrate}`
+                                );
+                            }
+                        }
+                    }
                 }
             });
 
@@ -397,12 +489,27 @@ class VideoHLSUploader {
                         `✅ Conversion completed. Generated ${totalSegments} segments`
                     );
 
-                    resolve({
+                    const segmentInfo = {
                         totalSegments,
                         outputDir,
                         playlistPath,
                         segmentFiles: segmentFiles.sort(),
-                    });
+                        convertedAt: new Date().toISOString(),
+                        movieId: movieId,
+                    };
+
+                    // Save segment info for future reuse
+                    const segmentInfoPath = path.join(
+                        outputDir,
+                        "segment-info.json"
+                    );
+                    fs.writeFileSync(
+                        segmentInfoPath,
+                        JSON.stringify(segmentInfo, null, 2)
+                    );
+                    console.log(`📝 Segment info saved to: segment-info.json`);
+
+                    resolve(segmentInfo);
                 } catch (error) {
                     reject(error);
                 }
