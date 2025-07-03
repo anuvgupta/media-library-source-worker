@@ -592,9 +592,20 @@ class VideoHLSUploader {
 
         for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
             const batch = batches[batchIndex];
+
+            // Track which segments in this batch actually get uploaded (not skipped)
+            let actualUploadsInBatch = 0;
+
             const batchPromises = batch.map((filename, batchPos) => {
                 const segmentIndex =
                     startIndex + batchIndex * this.concurrentUploads + batchPos;
+
+                // Check if this segment will be skipped before calling uploadSegment
+                const willBeSkipped = this.existingSegments.has(filename);
+                if (!willBeSkipped) {
+                    actualUploadsInBatch++;
+                }
+
                 return this.uploadSegment(
                     movieId,
                     filename,
@@ -603,19 +614,33 @@ class VideoHLSUploader {
                     outputDir
                 );
             });
+
             await Promise.all(batchPromises);
 
-            // Update playlist after each batch
-            const uploadedCount = Math.min(
-                this.prioritySegments +
-                    (batchIndex + 1) * this.concurrentUploads,
-                uploadSession.totalSegments
-            );
-            await this.uploadPartialPlaylist(
-                movieId,
-                uploadedCount,
-                segmentInfo
-            );
+            // Only update playlist if we actually uploaded new segments in this batch
+            if (actualUploadsInBatch > 0) {
+                const uploadedCount = Math.min(
+                    this.prioritySegments +
+                        (batchIndex + 1) * this.concurrentUploads,
+                    uploadSession.totalSegments
+                );
+                await this.uploadPartialPlaylist(
+                    movieId,
+                    uploadedCount,
+                    segmentInfo
+                );
+                console.log(
+                    `📝 Playlist updated after batch ${
+                        batchIndex + 1
+                    } (${actualUploadsInBatch} new segments uploaded)`
+                );
+            } else {
+                console.log(
+                    `⏭️  Skipping playlist update for batch ${
+                        batchIndex + 1
+                    } (all segments already existed)`
+                );
+            }
         }
     }
 
