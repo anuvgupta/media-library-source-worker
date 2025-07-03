@@ -45,6 +45,7 @@ class VideoHLSUploader {
         this.supportedFormats = [".mp4", ".mkv", ".avi", ".mov", ".m4v"];
         this.skipExistingSegments = options.skipExistingSegments !== false; // Default to true
         this.existingSegments = new Set(); // Track which segments already exist
+        this.playlistFilesExist = false;
         // this.testFiles = options.testFiles || [
         //     "./tst/test-movie.mp4",
         //     "./tst/test-movie.mkv",
@@ -169,6 +170,11 @@ class VideoHLSUploader {
 
             console.log(`Total segments: ${segmentInfo.totalSegments}`);
             console.log(`Segment duration: ${this.segmentDuration}s`);
+
+            // Check if playlist files exist in S3
+            this.playlistFilesExist = await this.checkPlaylistFilesExist(
+                movieId
+            );
 
             // Step 2: Upload priority segments first
             await this.uploadPrioritySegments(
@@ -551,20 +557,27 @@ class VideoHLSUploader {
 
         await Promise.all(priorityPromises);
 
-        // Only upload playlist if we actually uploaded new priority segments
-        if (actualPriorityUploads > 0) {
+        // Upload playlist if we uploaded new segments OR if playlist files don't exist
+        if (actualPriorityUploads > 0 || !this.playlistFilesExist) {
             // Upload initial playlist for priority segments
             await this.uploadPartialPlaylist(
                 movieId,
                 priorityFiles.length,
                 segmentInfo
             );
-            console.log(
-                `📝 Priority playlist uploaded (${actualPriorityUploads} new segments)`
-            );
+
+            if (actualPriorityUploads > 0) {
+                console.log(
+                    `📝 Priority playlist uploaded (${actualPriorityUploads} new segments)`
+                );
+            } else {
+                console.log(
+                    `📝 Priority playlist uploaded (playlist files were missing)`
+                );
+            }
         } else {
             console.log(
-                `⏭️  Skipping priority playlist upload (all ${priorityFiles.length} priority segments already existed)`
+                `⏭️  Skipping priority playlist upload (all ${priorityFiles.length} priority segments already existed and playlist files exist)`
             );
         }
 
@@ -608,6 +621,11 @@ class VideoHLSUploader {
             batches.push(segmentFiles.slice(i, i + this.concurrentUploads));
         }
 
+        // Define progress milestones
+        // const progressMilestones = [0.25, 0.5, 0.75, 1.0];
+        const progressMilestones = [0.5, 1.0];
+        const completedMilestones = new Set();
+
         for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
             const batch = batches[batchIndex];
 
@@ -635,13 +653,41 @@ class VideoHLSUploader {
 
             await Promise.all(batchPromises);
 
-            // Only update playlist if we actually uploaded new segments in this batch
+            const uploadedCount = Math.min(
+                this.prioritySegments +
+                    (batchIndex + 1) * this.concurrentUploads,
+                uploadSession.totalSegments
+            );
+
+            // Calculate current progress
+            const currentProgress = uploadedCount / uploadSession.totalSegments;
+
+            // Determine if we should update playlist
+            let shouldUpdatePlaylist = false;
+            let updateReason = "";
+
             if (actualUploadsInBatch > 0) {
-                const uploadedCount = Math.min(
-                    this.prioritySegments +
-                        (batchIndex + 1) * this.concurrentUploads,
-                    uploadSession.totalSegments
-                );
+                // Always update if we uploaded new segments
+                shouldUpdatePlaylist = true;
+                updateReason = `${actualUploadsInBatch} new segments uploaded`;
+            } else if (!this.playlistFilesExist) {
+                // If playlist didn't exist originally, check for milestone progress
+                for (const milestone of progressMilestones) {
+                    if (
+                        currentProgress >= milestone &&
+                        !completedMilestones.has(milestone)
+                    ) {
+                        shouldUpdatePlaylist = true;
+                        updateReason = `${(milestone * 100).toFixed(
+                            0
+                        )}% progress milestone reached`;
+                        completedMilestones.add(milestone);
+                        break; // Only trigger one milestone per batch
+                    }
+                }
+            }
+
+            if (shouldUpdatePlaylist) {
                 await this.uploadPartialPlaylist(
                     movieId,
                     uploadedCount,
@@ -650,13 +696,13 @@ class VideoHLSUploader {
                 console.log(
                     `📝 Playlist updated after batch ${
                         batchIndex + 1
-                    } (${actualUploadsInBatch} new segments uploaded)`
+                    } (${updateReason})`
                 );
             } else {
                 console.log(
                     `⏭️  Skipping playlist update for batch ${
                         batchIndex + 1
-                    } (all segments already existed)`
+                    } (all segments already existed, no milestones reached)`
                 );
             }
         }
@@ -738,7 +784,6 @@ class VideoHLSUploader {
         }
     }
 
-    // Replace uploadPartialPlaylist method
     async uploadPartialPlaylist(
         movieId,
         segmentCount,
@@ -904,6 +949,64 @@ class VideoHLSUploader {
                 error.message
             );
             return new Set();
+        }
+    }
+
+    async checkPlaylistFilesExist(movieId) {
+        try {
+            console.log("🔍 Checking if playlist files exist...");
+
+            const templateKey = `${this.playlistUploadPath}/${this.uploadSubpath}/movie/${movieId}/playlist-template.m3u8`;
+            const playlistKey = `${this.playlistUploadPath}/${this.uploadSubpath}/movie/${movieId}/playlist.m3u8`;
+
+            // Check template file
+            const templateExists = await this.checkS3ObjectExists(
+                this.playlistBucketName,
+                templateKey
+            );
+
+            // Check main playlist file
+            const playlistExists = await this.checkS3ObjectExists(
+                this.playlistBucketName,
+                playlistKey
+            );
+
+            console.log(
+                `📋 Playlist files status: template=${templateExists}, playlist=${playlistExists}`
+            );
+
+            // Return true only if both files exist
+            return templateExists && playlistExists;
+        } catch (error) {
+            console.warn(
+                "⚠️  Failed to check playlist files existence:",
+                error.message
+            );
+            // If we can't check, assume they don't exist to be safe
+            return false;
+        }
+    }
+
+    async checkS3ObjectExists(bucketName, key) {
+        try {
+            const { HeadObjectCommand } = require("@aws-sdk/client-s3");
+
+            const command = new HeadObjectCommand({
+                Bucket: bucketName,
+                Key: key,
+            });
+
+            await this.s3Client.send(command);
+            return true; // Object exists
+        } catch (error) {
+            if (
+                error.name === "NotFound" ||
+                error.$metadata?.httpStatusCode === 404
+            ) {
+                return false; // Object doesn't exist
+            }
+            // Re-throw other errors
+            throw error;
         }
     }
 
