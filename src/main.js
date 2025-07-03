@@ -131,7 +131,19 @@ class MediaWorker {
     // Stop worker mode
     stopWorkerMode() {
         console.log("🛑 Stopping worker mode...");
+        console.log(
+            `⏳ Waiting for ${this.processingUploads} active uploads to complete...`
+        );
+
         this.isWorkerRunning = false;
+
+        // You might want to add a graceful shutdown that waits for uploads
+        // For now, uploads will continue in the background
+        if (this.processingUploads > 0) {
+            console.log(
+                "💡 Tip: Active uploads will continue. Monitor logs for completion."
+            );
+        }
     }
 
     // Poll SQS for messages
@@ -1537,24 +1549,6 @@ class MediaWorker {
                     `    ${upload.movieId}: ${upload.status} (${duration})`
                 );
             });
-        }
-    }
-
-    // Modified stopWorkerMode to handle active uploads
-    stopWorkerMode() {
-        console.log("🛑 Stopping worker mode...");
-        console.log(
-            `⏳ Waiting for ${this.processingUploads} active uploads to complete...`
-        );
-
-        this.isWorkerRunning = false;
-
-        // You might want to add a graceful shutdown that waits for uploads
-        // For now, uploads will continue in the background
-        if (this.processingUploads > 0) {
-            console.log(
-                "💡 Tip: Active uploads will continue. Monitor logs for completion."
-            );
         }
     }
 

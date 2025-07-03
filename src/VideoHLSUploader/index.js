@@ -804,13 +804,13 @@ class VideoHLSUploader {
     async checkExistingSegments(movieId, uploadSubpath) {
         if (!this.skipExistingSegments) {
             console.log(
-                "⏭️  Segment skipping disabled, will upload all segments"
+                "⏭️  Segment upload skipping disabled, will upload all segments"
             );
             return new Set();
         }
 
         try {
-            console.log("🔍 Checking for existing segments...");
+            console.log("🔍 Checking for existing uploaded segments...");
 
             const listParams = {
                 Bucket: this.mediaBucketName,
@@ -838,7 +838,7 @@ class VideoHLSUploader {
                 }
 
                 console.log(
-                    `📋 Found ${existingSegments.size} existing segments to skip`
+                    `📋 Found ${existingSegments.size} existing uploaded segments to skip`
                 );
                 if (existingSegments.size > 0) {
                     const sortedSegments = Array.from(existingSegments).sort();
@@ -850,14 +850,14 @@ class VideoHLSUploader {
                 }
             } else {
                 console.log(
-                    "📋 No existing segments found, starting fresh upload"
+                    "📋 No existing uploaded segments found, starting fresh upload"
                 );
             }
 
             return existingSegments;
         } catch (error) {
             console.warn(
-                "⚠️  Failed to check existing segments, will upload all:",
+                "⚠️  Failed to check existing uploaded segments, will upload all:",
                 error.message
             );
             return new Set();
