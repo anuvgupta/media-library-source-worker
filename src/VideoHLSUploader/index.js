@@ -670,8 +670,8 @@ class VideoHLSUploader {
                 // Always update if we uploaded new segments
                 shouldUpdatePlaylist = true;
                 updateReason = `${actualUploadsInBatch} new segments uploaded`;
-            } else if (!this.playlistFilesExist) {
-                // If playlist didn't exist originally, check for milestone progress
+            } else {
+                // Update every few in case the playlist is out of date or some media batches were already uploaded
                 for (const milestone of progressMilestones) {
                     if (
                         currentProgress >= milestone &&
@@ -982,6 +982,8 @@ class VideoHLSUploader {
                 "⚠️  Failed to check playlist files existence:",
                 error.message
             );
+            console.warn(error);
+            console.log("Defaulting to creating new playlist");
             // If we can't check, assume they don't exist to be safe
             return false;
         }
