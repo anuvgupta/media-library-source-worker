@@ -248,6 +248,22 @@ class VideoHLSUploader {
                         (s) => s.codec_type === "audio"
                     );
 
+                    // Extract subtitle streams
+                    const subtitleStreams = info.streams.filter(
+                        (s) => s.codec_type === "subtitle"
+                    );
+                    const subtitleInfo = subtitleStreams.map(
+                        (stream, index) => ({
+                            index: stream.index,
+                            codec: stream.codec_name,
+                            language: stream.tags?.language || `track_${index}`,
+                            title:
+                                stream.tags?.title || `Subtitle ${index + 1}`,
+                            forced: stream.disposition?.forced === 1,
+                            default: stream.disposition?.default === 1,
+                        })
+                    );
+
                     const videoInfo = {
                         duration: parseFloat(info.format.duration),
                         videoCodec: videoStream
@@ -264,6 +280,8 @@ class VideoHLSUploader {
                             videoStream,
                             audioStream
                         ),
+                        subtitles: subtitleInfo,
+                        hasSubtitles: subtitleInfo.length > 0,
                     };
 
                     resolve(videoInfo);
@@ -333,7 +351,7 @@ class VideoHLSUploader {
         const playlistPath = path.join(outputDir, "playlist.m3u8");
         const segmentPattern = path.join(outputDir, "segment_%06d.ts");
 
-        return new Promise((resolve, reject) => {
+        return new Promise(async (resolve, reject) => {
             // Build FFmpeg arguments based on video analysis
             const ffmpegArgs = ["-i", filePath];
 
@@ -474,7 +492,7 @@ class VideoHLSUploader {
                 }
             });
 
-            ffmpeg.on("close", (code) => {
+            ffmpeg.on("close", async (code) => {
                 console.log(""); // New line after progress
 
                 if (code !== 0) {
@@ -515,6 +533,22 @@ class VideoHLSUploader {
                     );
                     console.log(`📝 Segment info saved to: segment-info.json`);
 
+                    if (videoInfo.hasSubtitles) {
+                        console.log(
+                            `🔤 Extracting ${videoInfo.subtitles.length} subtitle tracks...`
+                        );
+                        await this.extractSubtitles(
+                            filePath,
+                            movieId,
+                            videoInfo.subtitles,
+                            outputDir
+                        );
+                    }
+                    segmentInfo = {
+                        ...segmentInfo,
+                        subtitles: videoInfo.subtitles || [],
+                        hasSubtitles: videoInfo.hasSubtitles || false,
+                    };
                     resolve(segmentInfo);
                 } catch (error) {
                     reject(error);
@@ -604,8 +638,56 @@ class VideoHLSUploader {
             segmentInfo
         );
 
+        if (segmentInfo.hasSubtitles) {
+            console.log(`📤 Uploading subtitle files...`);
+            await this.uploadSubtitles(movieId, segmentInfo);
+        }
+
         uploadSession.status = "completed";
         await this.updateUploadStatus(movieId, uploadSession);
+    }
+
+    async uploadSubtitles(movieId, segmentInfo) {
+        const subtitleDir = path.join(segmentInfo.outputDir);
+        const subtitleFiles = fs
+            .readdirSync(subtitleDir)
+            .filter((f) => f.endsWith(".vtt"));
+
+        const uploadPromises = subtitleFiles.map(async (filename) => {
+            try {
+                const filePath = path.join(subtitleDir, filename);
+                const fileContent = fs.readFileSync(filePath);
+
+                const key = `${this.mediaUploadPath}/${this.uploadSubpath}/movie/${movieId}/subtitles/${filename}`;
+
+                const uploadParams = {
+                    Bucket: this.mediaBucketName,
+                    Key: key,
+                    Body: fileContent,
+                    ContentType: "text/vtt",
+                    CacheControl: "public, max-age=31536000",
+                    Metadata: {
+                        movieId: movieId,
+                        subtitleTrack: "true",
+                    },
+                };
+
+                const upload = new Upload({
+                    client: this.s3Client,
+                    params: uploadParams,
+                });
+
+                await upload.done();
+                console.log(`📦 Subtitle uploaded: ${filename}`);
+            } catch (error) {
+                console.error(
+                    `❌ Failed to upload subtitle ${filename}:`,
+                    error
+                );
+            }
+        });
+
+        await Promise.all(uploadPromises);
     }
 
     async uploadSegmentsWithConcurrency(
@@ -706,6 +788,65 @@ class VideoHLSUploader {
                 );
             }
         }
+    }
+
+    async extractSubtitles(inputFilePath, movieId, subtitleStreams, outputDir) {
+        const subtitlePromises = subtitleStreams.map(
+            async (subtitle, index) => {
+                const outputFilename = `subtitle_${subtitle.language}_${index}.vtt`;
+                const outputPath = path.join(outputDir, outputFilename);
+
+                return new Promise((resolve, reject) => {
+                    const ffmpegArgs = [
+                        "-i",
+                        inputFilePath,
+                        "-map",
+                        `0:s:${index}`,
+                        "-c:s",
+                        "webvtt",
+                        "-y", // Overwrite output file
+                        outputPath,
+                    ];
+
+                    const ffmpeg = spawn("ffmpeg", ffmpegArgs);
+                    let stderr = "";
+
+                    ffmpeg.stderr.on("data", (data) => {
+                        stderr += data.toString();
+                    });
+
+                    ffmpeg.on("close", (code) => {
+                        if (code === 0 && fs.existsSync(outputPath)) {
+                            console.log(
+                                `✅ Extracted subtitle: ${outputFilename}`
+                            );
+                            resolve({
+                                filename: outputFilename,
+                                language: subtitle.language,
+                                title: subtitle.title,
+                                path: outputPath,
+                            });
+                        } else {
+                            console.warn(
+                                `⚠️ Failed to extract subtitle ${index}: ${stderr}`
+                            );
+                            resolve(null); // Don't fail the entire process
+                        }
+                    });
+
+                    ffmpeg.on("error", (error) => {
+                        console.warn(
+                            `⚠️ Subtitle extraction error for track ${index}:`,
+                            error
+                        );
+                        resolve(null);
+                    });
+                });
+            }
+        );
+
+        const results = await Promise.all(subtitlePromises);
+        return results.filter((result) => result !== null);
     }
 
     async uploadSegment(
