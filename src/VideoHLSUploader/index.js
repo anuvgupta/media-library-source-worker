@@ -513,7 +513,7 @@ class VideoHLSUploader {
                         `✅ Conversion completed. Generated ${totalSegments} segments`
                     );
 
-                    const segmentInfo = {
+                    let segmentInfo = {
                         totalSegments,
                         outputDir,
                         playlistPath,
