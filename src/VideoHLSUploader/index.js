@@ -690,14 +690,33 @@ class VideoHLSUploader {
             );
         }
 
-        console.log(`✅ Priority segments processed. Ready for playback!`);
+        // *** UPLOAD SUBTITLES HERE - RIGHT AFTER PRIORITY SEGMENTS ***
+        if (segmentInfo.hasSubtitles) {
+            console.log(
+                `🔤 Uploading subtitle files for immediate playback...`
+            );
+            try {
+                await this.uploadSubtitles(movieId, segmentInfo);
+                console.log(`✅ Subtitles ready for playback!`);
+            } catch (error) {
+                console.warn(
+                    `⚠️ Subtitle upload failed (continuing without subtitles):`,
+                    error
+                );
+                // Don't fail the entire upload if subtitles fail
+            }
+        }
+
+        console.log(
+            `✅ Priority segments processed. Ready for playback with subtitles!`
+        );
 
         // Update status: Priority segments done
         await this.updateMovieStatus(
             movieId,
             40,
             "uploading",
-            "Stream preview ready"
+            "Stream preview ready with subtitles"
         );
 
         uploadSession.status = "ready_for_playback";
@@ -721,10 +740,8 @@ class VideoHLSUploader {
             segmentInfo
         );
 
-        if (segmentInfo.hasSubtitles) {
-            console.log(`📤 Uploading subtitle files...`);
-            await this.uploadSubtitles(movieId, segmentInfo);
-        }
+        // Subtitles already uploaded after priority segments
+        // No subtitle upload needed here anymore
 
         uploadSession.status = "completed";
         await this.updateUploadStatus(movieId, uploadSession);
@@ -735,6 +752,13 @@ class VideoHLSUploader {
         const subtitleFiles = fs
             .readdirSync(subtitleDir)
             .filter((f) => f.endsWith(".vtt"));
+
+        if (subtitleFiles.length === 0) {
+            console.log(`ℹ️  No subtitle files found to upload`);
+            return;
+        }
+
+        console.log(`📤 Uploading ${subtitleFiles.length} subtitle files...`);
 
         const uploadPromises = subtitleFiles.map(async (filename) => {
             try {
@@ -762,15 +786,38 @@ class VideoHLSUploader {
 
                 await upload.done();
                 console.log(`📦 Subtitle uploaded: ${filename}`);
+                return filename;
             } catch (error) {
                 console.error(
                     `❌ Failed to upload subtitle ${filename}:`,
                     error
                 );
+                throw error; // Let individual subtitle failures bubble up
             }
         });
 
-        await Promise.all(uploadPromises);
+        try {
+            const results = await Promise.allSettled(uploadPromises);
+            const successful = results.filter(
+                (r) => r.status === "fulfilled"
+            ).length;
+            const failed = results.filter(
+                (r) => r.status === "rejected"
+            ).length;
+
+            console.log(
+                `📊 Subtitle upload complete: ${successful} successful, ${failed} failed`
+            );
+
+            if (failed > 0) {
+                console.warn(
+                    `⚠️ Some subtitle uploads failed, but continuing...`
+                );
+            }
+        } catch (error) {
+            console.error(`❌ Subtitle upload batch failed:`, error);
+            throw error;
+        }
     }
 
     async uploadSegmentsWithConcurrency(
