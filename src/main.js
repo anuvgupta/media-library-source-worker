@@ -1455,6 +1455,14 @@ class MediaWorker {
     // New async upload handler
     async handleUploadMovieAsync(movieId, messageBody, message) {
         try {
+            // Update status: Processing started
+            await this.updateMovieUploadStatus(
+                movieId,
+                0,
+                "starting",
+                "Movie processing started"
+            );
+
             const libraryPath = CONFIG.libraryPath;
             const moviePathInLibrary = atob(messageBody.movieId);
             const moviePath = `${libraryPath}/${moviePathInLibrary}`;
@@ -1465,12 +1473,28 @@ class MediaWorker {
 
             const uploadResult = await this.uploadMedia(moviePath, movieId);
 
+            // Update status: Processing completed
+            await this.updateMovieUploadStatus(
+                movieId,
+                100,
+                "completed",
+                "Movie processing completed successfully"
+            );
+
             // Delete SQS message after successful upload
             await this.deleteMessage(message.ReceiptHandle);
             console.log(`✅ Message deleted for completed upload: ${movieId}`);
 
             return uploadResult;
         } catch (error) {
+            // Update status: Processing failed
+            await this.updateMovieUploadStatus(
+                movieId,
+                0,
+                "failed",
+                `Processing failed: ${error.message}`
+            );
+
             console.error(`❌ Upload failed for movie: ${movieId}`, error);
             // Don't delete message on failure - let it retry
             throw error;
@@ -1610,6 +1634,50 @@ class MediaWorker {
             });
         } catch (error) {
             throw new Error(`FFmpeg check failed: ${error.message}`);
+        }
+    }
+
+    // Method to update movie upload status via API
+    async updateMovieUploadStatus(
+        movieId,
+        percentage,
+        stageName,
+        message = null,
+        eta = null
+    ) {
+        if (!this.credentials?.identityId) {
+            console.warn("Cannot update status - not authenticated");
+            return;
+        }
+
+        try {
+            const ownerIdentityId = this.getIdentityId();
+            const apiEndpoint = `libraries/${ownerIdentityId}/movies/${movieId}/status`;
+
+            const requestBody = {
+                percentage,
+                stageName,
+                message,
+                eta,
+            };
+
+            console.log("STATUS UPDATE:", requestBody);
+
+            const response = await this.makeAuthenticatedAPIRequest(
+                "POST",
+                apiEndpoint,
+                requestBody
+            );
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.warn(
+                    `Failed to update status: ${response.status} ${errorText}`
+                );
+            }
+        } catch (error) {
+            console.warn("Failed to update upload status:", error.message);
+            // Don't throw - status updates shouldn't break the upload process
         }
     }
 }

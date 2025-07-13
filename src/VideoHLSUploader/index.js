@@ -352,6 +352,14 @@ class VideoHLSUploader {
     async convertToHLS(filePath, movieId, videoInfo) {
         console.log(`🔄 Converting to HLS segments...`);
 
+        // Update status: Starting conversion
+        await this.updateMovieStatus(
+            movieId,
+            5,
+            "reencoding",
+            "Starting video conversion to HLS format"
+        );
+
         const outputDir = path.join(this.tempDir, movieId);
         if (!fs.existsSync(outputDir)) {
             fs.mkdirSync(outputDir, { recursive: true });
@@ -445,6 +453,7 @@ class VideoHLSUploader {
 
             const ffmpeg = spawn("ffmpeg", ffmpegArgs);
             let stderr = "";
+            let lastStatusUpdate = 0;
 
             ffmpeg.stderr.on("data", (data) => {
                 const chunk = data.toString();
@@ -511,6 +520,29 @@ class VideoHLSUploader {
                                         eta
                                     )} | Bitrate: ${bitrate}`
                                 );
+
+                                // Update status every 15 seconds
+                                const now = Date.now();
+                                if (now - lastStatusUpdate > 15000) {
+                                    const percentage = Math.min(
+                                        5 + parseFloat(progress) * 0.3,
+                                        35
+                                    ); // 5-35% for conversion
+                                    const etaISO =
+                                        eta > 0
+                                            ? new Date(
+                                                  Date.now() + eta * 1000
+                                              ).toISOString()
+                                            : null;
+                                    this.updateMovieStatus(
+                                        movieId,
+                                        percentage,
+                                        "reencoding",
+                                        `Converting video: ${progress}% (${speedStr})`,
+                                        etaISO
+                                    );
+                                    lastStatusUpdate = now;
+                                }
                             }
                         }
                     }
@@ -527,6 +559,14 @@ class VideoHLSUploader {
                 }
 
                 try {
+                    // Update status: Conversion completed
+                    await this.updateMovieStatus(
+                        movieId,
+                        35,
+                        "converting_hls",
+                        "Video conversion completed, preparing HLS segments"
+                    );
+
                     // Count generated segments
                     const files = fs.readdirSync(outputDir);
                     const segmentFiles = files.filter(
@@ -723,13 +763,14 @@ class VideoHLSUploader {
         outputDir,
         segmentInfo
     ) {
+        let lastStatusUpdate = 0;
+
         const batches = [];
         for (let i = 0; i < segmentFiles.length; i += this.concurrentUploads) {
             batches.push(segmentFiles.slice(i, i + this.concurrentUploads));
         }
 
         // Define progress milestones
-        // const progressMilestones = [0.25, 0.5, 0.75, 1.0];
         const progressMilestones = [0.5, 1.0];
         const completedMilestones = new Set();
 
@@ -768,6 +809,19 @@ class VideoHLSUploader {
 
             // Calculate current progress
             const currentProgress = uploadedCount / uploadSession.totalSegments;
+
+            // Update status every 8 seconds
+            const now = Date.now();
+            if (now - lastStatusUpdate > 8000) {
+                const percentage = Math.min(50 + currentProgress * 45, 95); // 50-95% for remaining upload
+                this.updateMovieStatus(
+                    movieId,
+                    percentage,
+                    "uploading",
+                    `Uploading segments: ${uploadedCount}/${uploadSession.totalSegments}`
+                );
+                lastStatusUpdate = now;
+            }
 
             // Determine if we should update playlist
             let shouldUpdatePlaylist = false;
@@ -813,6 +867,14 @@ class VideoHLSUploader {
                 );
             }
         }
+
+        // Final status update: Upload completed
+        await this.updateMovieStatus(
+            movieId,
+            100,
+            "completed",
+            "All segments uploaded successfully"
+        );
     }
 
     async extractSubtitles(inputFilePath, movieId, subtitleStreams, outputDir) {
@@ -1182,6 +1244,33 @@ class VideoHLSUploader {
             }
             // Re-throw other errors
             throw error;
+        }
+    }
+
+    async updateMovieStatus(
+        movieId,
+        percentage,
+        stageName,
+        message = null,
+        eta = null
+    ) {
+        if (!this.makeAuthenticatedAPIRequest) {
+            return; // Skip if no API method available
+        }
+
+        try {
+            const apiEndpoint = `libraries/${this.uploadSubpath}/movies/${movieId}/status`;
+            const requestBody = { percentage, stageName, message, eta };
+
+            console.log("STATUS UPDATE:", requestBody);
+
+            await this.makeAuthenticatedAPIRequest(
+                "POST",
+                apiEndpoint,
+                requestBody
+            );
+        } catch (error) {
+            console.warn("Failed to update movie status:", error.message);
         }
     }
 
