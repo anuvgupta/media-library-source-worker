@@ -566,7 +566,7 @@ class VideoHLSUploader {
                         movieId,
                         29,
                         "converting_hls",
-                        "Conversion completed, preparing HLS segments"
+                        "Preparing stream"
                     );
 
                     // Count generated segments
