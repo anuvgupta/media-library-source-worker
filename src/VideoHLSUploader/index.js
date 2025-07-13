@@ -1144,12 +1144,19 @@ class VideoHLSUploader {
             // Return true only if both files exist
             return templateExists && playlistExists;
         } catch (error) {
-            console.warn(
-                "⚠️  Failed to check playlist files existence:",
-                error.message
-            );
-            console.warn(error);
-            console.log("Defaulting to creating new playlist");
+            const statusCode = error["$metadata"]?.httpStatusCode ?? 0;
+            if (statusCode == 403 || statusCode == 404) {
+                console.log("Playlist not accessible/not found");
+                console.log("Creating new playlist");
+            } else {
+                console.warn(
+                    "⚠️  Failed to check playlist files existence:",
+                    statusCode,
+                    error.message
+                );
+                console.warn(error);
+                console.log("Defaulting to creating new playlist");
+            }
             // If we can't check, assume they don't exist to be safe
             return false;
         }
