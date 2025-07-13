@@ -1146,7 +1146,7 @@ class VideoHLSUploader {
         } catch (error) {
             const statusCode = error["$metadata"]?.httpStatusCode ?? 0;
             if (statusCode == 403 || statusCode == 404) {
-                console.log("Playlist not accessible/not found");
+                console.log("⚠️  Playlist not accessible/not found");
                 console.log("Creating new playlist");
             } else {
                 console.warn(
