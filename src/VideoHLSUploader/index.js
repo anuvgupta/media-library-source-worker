@@ -256,7 +256,15 @@ class VideoHLSUploader {
                         (stream, index) => ({
                             index: stream.index,
                             codec: stream.codec_name,
-                            language: stream.tags?.language || `track_${index}`,
+                            language:
+                                stream.tags?.language ||
+                                stream.tags?.title
+                                    ?.match(
+                                        /\b(eng|english|spa|spanish|fre|french|ger|german)\b/i
+                                    )?.[0]
+                                    ?.slice(0, 3)
+                                    .toLowerCase() ||
+                                `und`, // Use 'und' for undefined instead of track_${index}
                             title:
                                 stream.tags?.title || `Subtitle ${index + 1}`,
                             forced: stream.disposition?.forced === 1,
@@ -329,6 +337,7 @@ class VideoHLSUploader {
         return {
             video: videoNeedsReencoding,
             audio: audioNeedsReencoding,
+            primaryAudioIndex: audioStream ? audioStream.index : 0, // Add this
             reason: {
                 video: videoNeedsReencoding
                     ? `${videoCodec} not web-compatible`
@@ -379,14 +388,25 @@ class VideoHLSUploader {
                 ffmpegArgs.push("-c:v", "copy"); // Copy video stream without re-encoding
             }
 
+            // Video stream mapping
+            ffmpegArgs.push("-map", "0:v:0"); // Always map the first video stream
+
             // Audio encoding settings
             if (videoInfo.needsReencoding.audio) {
                 console.log(
                     `🔄 Re-encoding audio: ${videoInfo.needsReencoding.reason.audio}`
                 );
                 ffmpegArgs.push(
+                    "-map",
+                    `0:${videoInfo.needsReencoding.primaryAudioIndex}`, // Select primary audio stream
                     "-c:a",
                     "aac", // Re-encode to AAC
+                    "-profile:a",
+                    "aac_low", // Use AAC-LC profile for compatibility
+                    "-ar",
+                    "48000", // Explicit sample rate
+                    "-ac",
+                    "2", // Force stereo output for compatibility
                     "-b:a",
                     "128k" // Audio bitrate
                 );
@@ -394,7 +414,12 @@ class VideoHLSUploader {
                 console.log(
                     `✅ Audio codec compatible (${videoInfo.audioCodec}), copying stream`
                 );
-                ffmpegArgs.push("-c:a", "copy"); // Copy audio stream without re-encoding
+                ffmpegArgs.push(
+                    "-map",
+                    `0:${videoInfo.needsReencoding.primaryAudioIndex}`, // Select primary audio stream even when copying
+                    "-c:a",
+                    "copy" // Copy audio stream without re-encoding
+                );
             }
 
             // HLS segmentation settings
@@ -801,7 +826,7 @@ class VideoHLSUploader {
                         "-i",
                         inputFilePath,
                         "-map",
-                        `0:s:${index}`,
+                        `0:${subtitle.index}`, // Use the actual stream index, not the array index
                         "-c:s",
                         "webvtt",
                         "-y", // Overwrite output file
