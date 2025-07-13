@@ -1478,7 +1478,7 @@ class MediaWorker {
                 movieId,
                 100,
                 "completed",
-                "Movie processing completed successfully"
+                "All processing completed"
             );
 
             // Delete SQS message after successful upload

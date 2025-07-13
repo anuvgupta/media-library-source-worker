@@ -355,9 +355,9 @@ class VideoHLSUploader {
         // Update status: Starting conversion
         await this.updateMovieStatus(
             movieId,
-            5,
+            1,
             "reencoding",
-            "Starting video conversion to HLS format"
+            "Starting video conversion"
         );
 
         const outputDir = path.join(this.tempDir, movieId);
@@ -525,9 +525,9 @@ class VideoHLSUploader {
                                 const now = Date.now();
                                 if (now - lastStatusUpdate > 15000) {
                                     const percentage = Math.min(
-                                        5 + parseFloat(progress) * 0.3,
-                                        35
-                                    ); // 5-35% for conversion
+                                        1 + parseFloat(progress) * 0.14,
+                                        15
+                                    ); // 1-15% for conversion
                                     const etaISO =
                                         eta > 0
                                             ? new Date(
@@ -538,7 +538,9 @@ class VideoHLSUploader {
                                         movieId,
                                         percentage,
                                         "reencoding",
-                                        `Converting video: ${progress}% (${speedStr})`,
+                                        `Encoding movie: ${Math.floor(
+                                            progress
+                                        )}% (${speedStr})`,
                                         etaISO
                                     );
                                     lastStatusUpdate = now;
@@ -562,9 +564,9 @@ class VideoHLSUploader {
                     // Update status: Conversion completed
                     await this.updateMovieStatus(
                         movieId,
-                        35,
+                        29,
                         "converting_hls",
-                        "Video conversion completed, preparing HLS segments"
+                        "Conversion completed, preparing HLS segments"
                     );
 
                     // Count generated segments
@@ -631,6 +633,14 @@ class VideoHLSUploader {
             `🚀 Uploading priority segments (first ${this.prioritySegments})...`
         );
 
+        // Update status: Starting upload
+        await this.updateMovieStatus(
+            movieId,
+            30,
+            "uploading",
+            "Streaming preview"
+        );
+
         const priorityFiles = segmentInfo.segmentFiles.slice(
             0,
             Math.min(this.prioritySegments, segmentInfo.totalSegments)
@@ -681,6 +691,14 @@ class VideoHLSUploader {
         }
 
         console.log(`✅ Priority segments processed. Ready for playback!`);
+
+        // Update status: Priority segments done
+        await this.updateMovieStatus(
+            movieId,
+            40,
+            "uploading",
+            "Stream preview ready"
+        );
 
         uploadSession.status = "ready_for_playback";
         await this.updateUploadStatus(movieId, uploadSession);
@@ -810,15 +828,17 @@ class VideoHLSUploader {
             // Calculate current progress
             const currentProgress = uploadedCount / uploadSession.totalSegments;
 
-            // Update status every 8 seconds
+            // Update status every 15 seconds
             const now = Date.now();
-            if (now - lastStatusUpdate > 8000) {
-                const percentage = Math.min(50 + currentProgress * 45, 95); // 50-95% for remaining upload
+            if (now - lastStatusUpdate > 15000) {
+                const percentage = Math.min(40 + currentProgress * 55, 95); // 40-95% for remaining upload
                 this.updateMovieStatus(
                     movieId,
                     percentage,
                     "uploading",
-                    `Uploading segments: ${uploadedCount}/${uploadSession.totalSegments}`
+                    `Streaming rest of movie: ${Math.floor(
+                        100 * currentProgress
+                    )}%`
                 );
                 lastStatusUpdate = now;
             }
@@ -868,12 +888,12 @@ class VideoHLSUploader {
             }
         }
 
-        // Final status update: Upload completed
+        // Final status update: Upload completed (this will be 100%)
         await this.updateMovieStatus(
             movieId,
             100,
             "completed",
-            "All segments uploaded successfully"
+            "All processing completed"
         );
     }
 
