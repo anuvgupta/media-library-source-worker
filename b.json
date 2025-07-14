@@ -3,9 +3,12 @@
     "targets": {
         "run": "npm run run",
         "start": "npm run start",
+        "stop": "npm run stop",
         "build": "npm run build",
         "login": "npm run login",
         "setup": "npm run setup",
+        "start-worker": "npm run start-worker",
+        "stop-worker": "npm run stop-worker",
         "clean": "npm run clean",
         "install": "npm install"
     }

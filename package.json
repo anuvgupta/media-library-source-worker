@@ -9,9 +9,12 @@
     "scripts": {
         "run": "./run.sh",
         "start": "./start.sh",
+        "stop": "./stop.sh",
         "build": "./build.sh",
         "login": "./login.sh",
         "setup": "./setup.sh",
+        "start-worker": "./start-worker.sh",
+        "stop-worker": "./stop-worker.sh",
         "clean": "echo \"Error: no clean actions specified\" && exit 1",
         "test": "echo \"Error: no test specified\" && exit 1"
     },
@@ -22,9 +25,7 @@
         "@aws-sdk/client-sqs": "^3.835.0",
         "@aws-sdk/lib-storage": "^3.839.0",
         "@aws-sdk/s3-request-presigner": "^3.839.0",
-        "aws4": "^1.13.2"
-    },
-    "devDependencies": {
+        "aws4": "^1.13.2",
         "pm2": "^6.0.8"
     },
     "repository": {

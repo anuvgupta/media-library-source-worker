@@ -95,11 +95,7 @@ fi
 # Step 4: Run interactive setup
 print_step "Starting interactive setup container..."
 echo ""
-echo -e "${YELLOW}📋 SETUP INSTRUCTIONS:${NC}"
-echo "1. The container will start and run the login script automatically"
-echo "2. Enter your username and password when prompted"
-echo "3. Wait for authentication to complete"
-echo "4. Type 'exit' when you see the success message"
+echo -e "${YELLOW}Please enter your username and password when prompted.${NC}"
 echo ""
 echo -e "${BLUE}Press Enter to continue...${NC}"
 read
