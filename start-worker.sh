@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
 # start-worker.sh - Start the media worker in production mode
 
 IMAGE_NAME="media-worker-authenticated"

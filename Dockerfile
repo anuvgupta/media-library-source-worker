@@ -20,6 +20,9 @@ RUN mkdir -p /app/temp /app/config
 # Copy package files first (for better caching)
 COPY package*.json ./
 
+# Install pm2
+RUN npm i -g pm2
+
 # Install dependencies
 RUN npm ci --only=production
 

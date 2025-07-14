@@ -1,5 +1,6 @@
-#!/bin/bash
-# logs.sh - View worker logs
+#!/usr/bin/env bash
+
+# logs-worker.sh - View worker logs
 
 CONTAINER_NAME="media-worker"
 

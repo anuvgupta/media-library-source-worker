@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
 # stop-worker.sh - Stop the media worker
 
 CONTAINER_NAME="media-worker"

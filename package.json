@@ -13,6 +13,7 @@
         "build": "./build.sh",
         "login": "./login.sh",
         "setup": "./setup.sh",
+        "logs-worker": "./logs-worker.sh",
         "start-worker": "./start-worker.sh",
         "stop-worker": "./stop-worker.sh",
         "clean": "echo \"Error: no clean actions specified\" && exit 1",
