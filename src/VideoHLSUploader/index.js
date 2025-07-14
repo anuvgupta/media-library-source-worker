@@ -716,7 +716,8 @@ class VideoHLSUploader {
             movieId,
             40,
             "uploading",
-            "Stream preview ready with subtitles"
+            // "Stream preview ready with subtitles"
+            "Stream preview ready"
         );
 
         uploadSession.status = "ready_for_playback";
