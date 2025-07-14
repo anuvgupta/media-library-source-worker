@@ -27,7 +27,8 @@
         "@aws-sdk/lib-storage": "^3.839.0",
         "@aws-sdk/s3-request-presigner": "^3.839.0",
         "aws4": "^1.13.2",
-        "pm2": "^6.0.8"
+        "pm2": "^6.0.8",
+        "read": "^4.1.0"
     },
     "repository": {
         "type": "git",

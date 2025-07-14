@@ -68,6 +68,7 @@ docker run -d \
     -v media-worker-tokens:/app/tokens \
     -v "$LIBRARY_PATH:/media" \
     -e TOKEN_FILE=/app/tokens/.worker-tokens.json \
+    -e LIBRARY_PATH=/media \
     $IMAGE_NAME ./start.sh
 
 print_success "Worker started successfully!"

@@ -11,6 +11,7 @@ const { spawn } = require("child_process");
 const { promisify } = require("util");
 const { randomUUID } = require("crypto");
 
+const read = require("read");
 const aws4 = require("aws4");
 const {
     SQSClient,
@@ -44,6 +45,9 @@ const { VideoHLSUploader } = require("./VideoHLSUploader/index.js");
 // Configuration
 const CONFIG_FILE = path.join(__dirname, "../config/dev.json");
 const CONFIG = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+const LIBRARY_PATH = process.env.LIBRARY_PATH
+    ? process.env.LIBRARY_PATH
+    : CONFIG.libraryPath;
 
 // Token storage file
 const TOKEN_FILE = path.join(__dirname, "../.worker-tokens.json");
@@ -219,7 +223,7 @@ class MediaWorker {
     async handleRefreshLibrary(messageBody) {
         console.log("🔄 Handling refresh-library command");
 
-        const libraryPath = CONFIG.libraryPath; // Use from config
+        const libraryPath = LIBRARY_PATH; // Use from config/env
         const outputFile = `${libraryPath}/media-library.json`;
 
         const libraryData = await this.scanLibrary(libraryPath);
@@ -445,7 +449,7 @@ class MediaWorker {
             return { status: "duplicate_request_discarded", movieId };
         }
 
-        const libraryPath = CONFIG.libraryPath; // Use from config
+        const libraryPath = LIBRARY_PATH; // Use from config/env
         const moviePathInLibrary = atob(messageBody.movieId);
         const moviePath = `${libraryPath}/${moviePathInLibrary}`;
 
@@ -513,46 +517,33 @@ class MediaWorker {
 
     // Get user input securely
     async getInput(prompt, hidden = false) {
-        const rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout,
-        });
-
-        return new Promise((resolve) => {
-            if (hidden) {
-                const stdin = process.openStdin();
-                process.stdout.write(prompt);
-                stdin.setRawMode(true);
-                stdin.resume();
-                stdin.setEncoding("utf8");
-                let password = "";
-                stdin.on("data", (ch) => {
-                    ch = ch + "";
-                    switch (ch) {
-                        case "\n":
-                        case "\r":
-                        case "\u0004":
-                            stdin.setRawMode(false);
-                            stdin.pause();
-                            console.log("");
-                            resolve(password);
-                            break;
-                        case "\u0003":
-                            process.exit();
-                            break;
-                        default:
-                            password += ch;
-                            process.stdout.write("*");
-                            break;
+        if (hidden) {
+            return new Promise((resolve, reject) => {
+                read(
+                    {
+                        prompt: prompt,
+                        silent: true,
+                        replace: "*",
+                    },
+                    (err, password) => {
+                        if (err) reject(err);
+                        else resolve(password);
                     }
-                });
-            } else {
+                );
+            });
+        } else {
+            const rl = readline.createInterface({
+                input: process.stdin,
+                output: process.stdout,
+            });
+
+            return new Promise((resolve) => {
                 rl.question(prompt, (answer) => {
                     rl.close();
                     resolve(answer);
                 });
-            }
-        });
+            });
+        }
     }
 
     // Add this method to decode JWT token and extract sub
@@ -1463,7 +1454,7 @@ class MediaWorker {
                 "Movie processing started"
             );
 
-            const libraryPath = CONFIG.libraryPath;
+            const libraryPath = LIBRARY_PATH;
             const moviePathInLibrary = atob(messageBody.movieId);
             const moviePath = `${libraryPath}/${moviePathInLibrary}`;
 

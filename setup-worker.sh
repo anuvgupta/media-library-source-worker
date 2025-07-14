@@ -123,6 +123,7 @@ docker run -it \
     -v media-worker-tokens:/app/tokens \
     -v "$LIBRARY_PATH:/media" \
     -e TOKEN_FILE=/app/tokens/.worker-tokens.json \
+    -e LIBRARY_PATH=/media \
     $IMAGE_NAME ./login.sh
 
 # Step 5: Commit the authenticated container
