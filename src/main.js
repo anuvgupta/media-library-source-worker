@@ -1730,6 +1730,11 @@ async function main() {
                 await worker.showStatus();
                 break;
 
+            case "login":
+                // Already logged in
+                // await worker.login();
+                break;
+
             case "upload-status":
                 const uploadStatus = worker.getUploadStatus();
                 console.log("📊 Current Upload Status:");
@@ -1794,6 +1799,7 @@ async function main() {
                 console.log(
                     "  status                      - Show authentication status"
                 );
+                console.log("  login                      - Log in");
                 break;
         }
     } catch (error) {

@@ -9,4 +9,4 @@ if [ -f .env ]; then
   export $(cat .env | xargs)
 fi
 
-pm2 start ecosystem.config.js
+node src/main.js worker

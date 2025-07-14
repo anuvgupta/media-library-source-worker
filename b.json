@@ -1,8 +1,11 @@
 {
     "package": "media-library-source-worker",
     "targets": {
-        "start": "./start.sh",
+        "run": "npm run run",
+        "start": "npm run start",
         "build": "npm run build",
+        "login": "npm run login",
+        "setup": "npm run setup",
         "clean": "npm run clean",
         "install": "npm install"
     }
