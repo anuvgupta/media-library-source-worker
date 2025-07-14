@@ -52,6 +52,22 @@ if [ ! -f "$CONFIG_DIR/dev.json" ]; then
 fi
 print_success "Configuration file found"
 
+# Extract libraryPath from config using jq
+print_step "Reading library path from config..."
+if command -v jq &> /dev/null; then
+    LIBRARY_PATH=$(jq -r '.libraryPath' "$CONFIG_DIR/dev.json")
+else
+    # Fallback to grep/sed method
+    LIBRARY_PATH=$(cat "$CONFIG_DIR/dev.json" | grep -o '"libraryPath"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"libraryPath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+fi
+
+if [ -z "$LIBRARY_PATH" ] || [ "$LIBRARY_PATH" = "null" ]; then
+    print_error "libraryPath not found in config file"
+    exit 1
+fi
+
+print_success "Library path found: $LIBRARY_PATH"
+
 # # Step 2: Check for base image and pull from Docker Hub if needed
 # print_step "Checking for base image..."
 # if docker images --format '{{.Repository}}' | grep -q "^${IMAGE_NAME}$"; then
@@ -105,6 +121,7 @@ docker run -it \
     --name $CONTAINER_NAME \
     -v "$(pwd)/$CONFIG_DIR:/app/config" \
     -v media-worker-tokens:/app/tokens \
+    -v "$LIBRARY_PATH:/media" \
     -e TOKEN_FILE=/app/tokens/.worker-tokens.json \
     $IMAGE_NAME ./login.sh
 
