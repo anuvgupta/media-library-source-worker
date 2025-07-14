@@ -95,7 +95,7 @@ fi
 # Step 4: Run interactive setup
 print_step "Starting interactive setup container..."
 echo ""
-echo -e "${YELLOW}Please enter your username and password when prompted.${NC}"
+echo -e "${YELLOW}Please enter your username and password if prompted.${NC}"
 echo ""
 echo -e "${BLUE}Press Enter to continue...${NC}"
 read
