@@ -11,7 +11,6 @@ const { spawn } = require("child_process");
 const { promisify } = require("util");
 const { randomUUID } = require("crypto");
 
-const read = require("read");
 const aws4 = require("aws4");
 const {
     SQSClient,
@@ -519,17 +518,62 @@ class MediaWorker {
     async getInput(prompt, hidden = false) {
         if (hidden) {
             return new Promise((resolve, reject) => {
-                read(
-                    {
-                        prompt: prompt,
-                        silent: true,
-                        replace: "*",
-                    },
-                    (err, password) => {
-                        if (err) reject(err);
-                        else resolve(password);
+                process.stdout.write(prompt);
+
+                // Set raw mode to capture each keypress
+                process.stdin.setRawMode(true);
+                process.stdin.resume();
+                process.stdin.setEncoding("utf8");
+
+                let password = "";
+
+                const onData = (ch) => {
+                    const charCode = ch.charCodeAt(0);
+
+                    switch (charCode) {
+                        case 13: // Enter key (\r)
+                        case 10: // Enter key (\n)
+                        case 4: // Ctrl+D
+                            process.stdin.setRawMode(false);
+                            process.stdin.pause();
+                            process.stdin.removeListener("data", onData);
+                            process.stdout.write("\n");
+                            resolve(password);
+                            break;
+                        case 3: // Ctrl+C
+                            process.stdin.setRawMode(false);
+                            process.stdin.pause();
+                            process.stdin.removeListener("data", onData);
+                            process.stdout.write("\n");
+                            process.exit(0);
+                            break;
+                        case 127: // Backspace/Delete
+                        case 8: // Backspace
+                            if (password.length > 0) {
+                                password = password.slice(0, -1);
+                                process.stdout.write("\b \b");
+                            }
+                            break;
+                        default:
+                            // Only add printable characters
+                            if (charCode >= 32 && charCode <= 126) {
+                                password += ch;
+                                process.stdout.write("*");
+                            }
+                            break;
                     }
-                );
+                };
+
+                process.stdin.on("data", onData);
+
+                // Handle process termination
+                process.on("SIGINT", () => {
+                    process.stdin.setRawMode(false);
+                    process.stdin.pause();
+                    process.stdin.removeListener("data", onData);
+                    process.stdout.write("\n");
+                    process.exit(0);
+                });
             });
         } else {
             const rl = readline.createInterface({
