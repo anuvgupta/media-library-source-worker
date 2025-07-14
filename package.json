@@ -12,7 +12,7 @@
         "stop": "./stop.sh",
         "build": "./build.sh",
         "login": "./login.sh",
-        "setup": "./setup.sh",
+        "setup-worker": "./setup-worker.sh",
         "logs-worker": "./logs-worker.sh",
         "start-worker": "./start-worker.sh",
         "stop-worker": "./stop-worker.sh",

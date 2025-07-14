@@ -6,7 +6,7 @@
         "stop": "npm run stop",
         "build": "npm run build",
         "login": "npm run login",
-        "setup": "npm run setup",
+        "setup-worker": "npm run setup-worker",
         "logs-worker": "npm run logs-worker",
         "start-worker": "npm run start-worker",
         "stop-worker": "npm run stop-worker",
