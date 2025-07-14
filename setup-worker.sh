@@ -124,7 +124,7 @@ docker run -it \
     -v "$LIBRARY_PATH:/media" \
     -e TOKEN_FILE=/app/tokens/.worker-tokens.json \
     -e LIBRARY_PATH=/media \
-    $IMAGE_NAME ./login.sh
+    $IMAGE_NAME bash ./login.sh
 
 # Step 5: Commit the authenticated container
 print_step "Creating authenticated image..."
