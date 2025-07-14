@@ -48,6 +48,10 @@ const LIBRARY_PATH = process.env.LIBRARY_PATH
     ? process.env.LIBRARY_PATH
     : CONFIG.libraryPath;
 
+console.log("process.env.LIBRARY_PATH", process.env.LIBRARY_PATH);
+console.log("CONFIG.libraryPath", CONFIG.libraryPath);
+
+
 // Token storage file
 const TOKEN_FILE = path.join(__dirname, "../.worker-tokens.json");
 
@@ -238,9 +242,8 @@ class MediaWorker {
                 throw new Error("Not authenticated - cannot upload to S3");
             }
 
-            const s3Key = `${
-                CONFIG.libraryUploadPath
-            }/${this.getIdentityId()}/library.json`;
+            const s3Key = `${CONFIG.libraryUploadPath
+                }/${this.getIdentityId()}/library.json`;
             const jsonContent = JSON.stringify(libraryData, null, 2);
 
             console.log(
@@ -467,8 +470,7 @@ class MediaWorker {
             const uploadResult = await this.uploadMedia(moviePath, movieId);
 
             console.log(
-                `✅ Movie upload completed: ${
-                    movieId || path.basename(moviePath)
+                `✅ Movie upload completed: ${movieId || path.basename(moviePath)
                 }`
             );
             return uploadResult;
@@ -936,16 +938,19 @@ class MediaWorker {
 
     // Check if file is a video that should use HLS upload
     isVideoFile(filePath) {
+        const fileName = path.basename(filePath);
         const ext = path.extname(filePath).toLowerCase();
+
+        // Skip macOS metadata files and other system files
+        if (fileName.startsWith('._') ||
+            fileName.startsWith('.DS_Store') ||
+            fileName.startsWith('Thumbs.db') ||
+            fileName.startsWith('.')) {
+            return false;
+        }
+
         const videoExtensions = [
-            ".mp4",
-            ".mkv",
-            ".avi",
-            ".mov",
-            ".m4v",
-            ".wmv",
-            ".flv",
-            ".webm",
+            ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".wmv", ".flv", ".webm"
         ];
         return videoExtensions.includes(ext);
     }
@@ -1307,8 +1312,7 @@ class MediaWorker {
             }
 
             console.log(
-                `\nLibrary scan complete. Found ${
-                    Object.keys(collections).length
+                `\nLibrary scan complete. Found ${Object.keys(collections).length
                 } collections with ${Object.values(collections).reduce(
                     (total, movies) => total + movies.length,
                     0

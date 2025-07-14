@@ -55,18 +55,19 @@ print_success "Configuration file found"
 # Extract libraryPath from config using jq
 print_step "Reading library path from config..."
 if command -v jq &> /dev/null; then
-    LIBRARY_PATH=$(jq -r '.libraryPath' "$CONFIG_DIR/dev.json")
+    HOST_LIBRARY_PATH=$(jq -r '.libraryPath' "$CONFIG_DIR/dev.json")
 else
     # Fallback to grep/sed method
-    LIBRARY_PATH=$(cat "$CONFIG_DIR/dev.json" | grep -o '"libraryPath"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"libraryPath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    HOST_LIBRARY_PATH=$(cat "$CONFIG_DIR/dev.json" | grep -o '"libraryPath"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"libraryPath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
 fi
 
-if [ -z "$LIBRARY_PATH" ] || [ "$LIBRARY_PATH" = "null" ]; then
+if [ -z "$HOST_LIBRARY_PATH" ] || [ "$HOST_LIBRARY_PATH" = "null" ]; then
     print_error "libraryPath not found in config file"
     exit 1
 fi
 
-print_success "Library path found: $LIBRARY_PATH"
+print_success "Host library path found: $HOST_LIBRARY_PATH"
+print_success "Container library path will be: /media"
 
 # # Step 2: Check for base image and pull from Docker Hub if needed
 # print_step "Checking for base image..."
@@ -116,12 +117,12 @@ echo ""
 echo -e "${BLUE}Press Enter to continue...${NC}"
 read
 
-# Run container interactively
-docker run -it \
+# FIXED: Use HOST_LIBRARY_PATH for volume mounting, but set LIBRARY_PATH to container path
+MSYS_NO_PATHCONV=1 docker run -it \
     --name $CONTAINER_NAME \
     -v "$(pwd)/$CONFIG_DIR:/app/config" \
     -v media-worker-tokens:/app/tokens \
-    -v "$LIBRARY_PATH:/media" \
+    -v "$HOST_LIBRARY_PATH:/media" \
     -e TOKEN_FILE=/app/tokens/.worker-tokens.json \
     -e LIBRARY_PATH=/media \
     $IMAGE_NAME bash ./login.sh
@@ -144,40 +145,56 @@ fi
 # echo ""
 # echo -e "${GREEN}🎉 Setup Complete!${NC}"
 # echo ""
+# echo -e "${BLUE}Configuration Summary:${NC}"
+# echo "  Host library path: $HOST_LIBRARY_PATH"
+# echo "  Container library path: /media"
+# echo "  Authenticated image: $AUTHENTICATED_IMAGE"
+# echo ""
 # echo -e "${BLUE}Usage Commands:${NC}"
 # echo ""
-# echo "# Run worker mode (continuous processing):"
+# echo "# Start worker using the helper script:"
+# echo "./start-worker.sh"
+# echo ""
+# echo "# Or run worker mode manually:"
 # echo "docker run --name media-worker -d \\"
+# echo "  --restart unless-stopped \\"
 # echo "  -v $(pwd)/$CONFIG_DIR:/app/config \\"
 # echo "  -v media-worker-tokens:/app/tokens \\"
+# echo "  -v \"$HOST_LIBRARY_PATH:/media\" \\"
 # echo "  -e TOKEN_FILE=/app/tokens/.worker-tokens.json \\"
-# echo "  $AUTHENTICATED_IMAGE"
+# echo "  -e LIBRARY_PATH=/media \\"
+# echo "  $AUTHENTICATED_IMAGE bash ./start.sh"
 # echo ""
 # echo "# Check worker status:"
 # echo "docker run --rm \\"
 # echo "  -v $(pwd)/$CONFIG_DIR:/app/config \\"
 # echo "  -v media-worker-tokens:/app/tokens \\"
+# echo "  -v \"$HOST_LIBRARY_PATH:/media\" \\"
 # echo "  -e TOKEN_FILE=/app/tokens/.worker-tokens.json \\"
+# echo "  -e LIBRARY_PATH=/media \\"
 # echo "  $AUTHENTICATED_IMAGE node main.js status"
 # echo ""
 # echo "# Upload a specific media file:"
 # echo "docker run --rm \\"
 # echo "  -v $(pwd)/$CONFIG_DIR:/app/config \\"
 # echo "  -v media-worker-tokens:/app/tokens \\"
-# echo "  -v /path/to/your/media:/media \\"
+# echo "  -v \"$HOST_LIBRARY_PATH:/media\" \\"
 # echo "  -e TOKEN_FILE=/app/tokens/.worker-tokens.json \\"
-# echo "  $AUTHENTICATED_IMAGE node main.js upload-media /media/movie.mp4 <movie-id>"
+# echo "  -e LIBRARY_PATH=/media \\"
+# echo "  $AUTHENTICATED_IMAGE node main.js upload-media /media/Collection/Movie/movie.mp4 <movie-id>"
 # echo ""
 # echo "# Scan library:"
 # echo "docker run --rm \\"
 # echo "  -v $(pwd)/$CONFIG_DIR:/app/config \\"
 # echo "  -v media-worker-tokens:/app/tokens \\"
-# echo "  -v /path/to/your/library:/library \\"
+# echo "  -v \"$HOST_LIBRARY_PATH:/media\" \\"
 # echo "  -e TOKEN_FILE=/app/tokens/.worker-tokens.json \\"
-# echo "  $AUTHENTICATED_IMAGE node main.js scan-library /library"
+# echo "  -e LIBRARY_PATH=/media \\"
+# echo "  $AUTHENTICATED_IMAGE node main.js scan-library /media"
 # echo ""
 # echo -e "${YELLOW}💡 Tips:${NC}"
 # echo "- Tokens are stored in the 'media-worker-tokens' Docker volume"
-# echo "- Mount your media library using -v /host/path:/container/path"
-# echo "- Use -d flag to run worker in detached mode"
+# echo "- Library is mounted from $HOST_LIBRARY_PATH to /media in container"
+# echo "- Use the start-worker.sh script for easy worker management"
 # echo "- Use 'docker logs media-worker' to view worker output"
+# echo "- Use 'docker stop media-worker' to stop the worker"

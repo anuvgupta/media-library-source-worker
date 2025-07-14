@@ -33,13 +33,13 @@ fi
 
 # Extract libraryPath from config
 if command -v jq &> /dev/null; then
-    LIBRARY_PATH=$(jq -r '.libraryPath' "$CONFIG_DIR/dev.json")
+    HOST_LIBRARY_PATH=$(jq -r '.libraryPath' "$CONFIG_DIR/dev.json")
 else
     # Fallback to grep/sed method
-    LIBRARY_PATH=$(cat "$CONFIG_DIR/dev.json" | grep -o '"libraryPath"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"libraryPath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    HOST_LIBRARY_PATH=$(cat "$CONFIG_DIR/dev.json" | grep -o '"libraryPath"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"libraryPath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
 fi
 
-if [ -z "$LIBRARY_PATH" ] || [ "$LIBRARY_PATH" = "null" ]; then
+if [ -z "$HOST_LIBRARY_PATH" ] || [ "$HOST_LIBRARY_PATH" = "null" ]; then
     print_error "libraryPath not found in config file"
     exit 1
 fi
@@ -59,14 +59,16 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
 fi
 
 echo "🚀 Starting media worker..."
-echo "📁 Library path: $LIBRARY_PATH"
+echo "📁 Host library path: $HOST_LIBRARY_PATH"
+echo "📁 Container library path: /media"
 
-docker run -d \
+# FIXED: Use the HOST path for volume mounting, but set LIBRARY_PATH to the container path
+MSYS_NO_PATHCONV=1 docker run -d \
     --name $CONTAINER_NAME \
     --restart unless-stopped \
     -v "$(pwd)/$CONFIG_DIR:/app/config" \
     -v media-worker-tokens:/app/tokens \
-    -v "$LIBRARY_PATH:/media" \
+    -v "$HOST_LIBRARY_PATH:/media" \
     -e TOKEN_FILE=/app/tokens/.worker-tokens.json \
     -e LIBRARY_PATH=/media \
     $IMAGE_NAME bash ./start.sh
