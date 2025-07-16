@@ -71,39 +71,39 @@ fi
 print_success "Host library path found: $HOST_LIBRARY_PATH"
 print_success "Container library path will be: /media"
 
-# Step 2: Check for base image and pull from Docker Hub if needed
-print_step "Checking for base image..."
-if docker images --format '{{.Repository}}' | grep -q "^${IMAGE_NAME}$"; then
-    print_success "Base image found locally"
-else
-    print_warning "Base image not found locally"
+# # Step 2: Check for base image and pull from Docker Hub if needed
+# print_step "Checking for base image..."
+# if docker images --format '{{.Repository}}' | grep -q "^${IMAGE_NAME}$"; then
+#     print_success "Base image found locally"
+# else
+#     print_warning "Base image not found locally"
     
-    # Check if DOCKER_HUB_IMAGE is set in environment or .env
-    if [ -z "$DOCKER_HUB_IMAGE" ]; then
-        print_error "DOCKER_HUB_IMAGE not set in environment variables"
-        print_warning "Please set DOCKER_HUB_IMAGE in your .env file or environment"
-        echo "Example: DOCKER_HUB_IMAGE=username/media-worker:latest"
-        exit 1
-    fi
+#     # Check if DOCKER_HUB_IMAGE is set in environment or .env
+#     if [ -z "$DOCKER_HUB_IMAGE" ]; then
+#         print_error "DOCKER_HUB_IMAGE not set in environment variables"
+#         print_warning "Please set DOCKER_HUB_IMAGE in your .env file or environment"
+#         echo "Example: DOCKER_HUB_IMAGE=username/media-worker:latest"
+#         exit 1
+#     fi
     
-    print_step "Pulling base image from Docker Hub: $DOCKER_HUB_IMAGE"
-    if docker pull "$DOCKER_HUB_IMAGE"; then
-        # Tag the pulled image with our local name
-        docker tag "$DOCKER_HUB_IMAGE" "$IMAGE_NAME"
-        print_success "Base image pulled and tagged successfully"
-    else
-        print_error "Failed to pull image from Docker Hub"
-        print_warning "You can either:"
-        echo "1. Build the image locally: docker build -t $IMAGE_NAME ."
-        echo "2. Check your DOCKER_HUB_IMAGE setting: $DOCKER_HUB_IMAGE"
-        exit 1
-    fi
-fi
+#     print_step "Pulling base image from Docker Hub: $DOCKER_HUB_IMAGE"
+#     if docker pull "$DOCKER_HUB_IMAGE"; then
+#         # Tag the pulled image with our local name
+#         docker tag "$DOCKER_HUB_IMAGE" "$IMAGE_NAME"
+#         print_success "Base image pulled and tagged successfully"
+#     else
+#         print_error "Failed to pull image from Docker Hub"
+#         print_warning "You can either:"
+#         echo "1. Build the image locally: docker build -t $IMAGE_NAME ."
+#         echo "2. Check your DOCKER_HUB_IMAGE setting: $DOCKER_HUB_IMAGE"
+#         exit 1
+#     fi
+# fi
 
-# Step 2: Build the base image
-print_step "Building base Docker image..."
-docker build -t $IMAGE_NAME .
-print_success "Base image built successfully"
+# # Step 2: Build the base image
+# print_step "Building base Docker image..."
+# docker build -t $IMAGE_NAME .
+# print_success "Base image built successfully"
 
 # Step 3: Check if we need to clean up existing containers
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
