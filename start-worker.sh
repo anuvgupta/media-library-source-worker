@@ -4,7 +4,7 @@
 
 STAGE_ENV="${STAGE:-dev}"
 
-IMAGE_NAME="media-worker-authenticated"
+IMAGE_NAME="media-worker-authenticated-$STAGE_ENV"
 CONTAINER_NAME="media-worker"
 CONFIG_DIR="./config"
 
