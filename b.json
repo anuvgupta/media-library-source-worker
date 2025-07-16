@@ -10,6 +10,8 @@
         "logs-worker": "npm run logs-worker",
         "start-worker": "npm run start-worker",
         "stop-worker": "npm run stop-worker",
+        "launch-worker": "npm run launch-worker",
+        "launch": "b launch-worker",
         "clean": "npm run clean",
         "install": "npm install"
     }
