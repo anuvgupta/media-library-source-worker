@@ -425,57 +425,18 @@ class VideoHLSUploader {
             return null;
         }
 
-        if (audioStreams.length === 1) {
-            return audioStreams[0];
-        }
+        // Simply return the first audio stream in the list
+        const firstAudioStream = audioStreams[0];
 
-        // Score audio streams based on compatibility and preference
-        const scoredStreams = audioStreams.map((stream) => {
-            let score = 0;
-            const language = stream.tags?.language?.toLowerCase() || "";
-            const title = stream.tags?.title?.toLowerCase() || "";
-            const channels = stream.channels || 0;
-            const codec = stream.codec_name?.toLowerCase() || "";
-
-            // Prefer common languages
-            if (language.includes("eng") || language.includes("english"))
-                score += 10;
-            if (language.includes("und") || language === "") score += 5; // undefined often means primary
-
-            // Prefer simpler channel configurations
-            if (channels === 2) score += 8;
-            else if (channels === 1) score += 5;
-            else if (channels <= 6) score += 3;
-            else score -= 5; // Penalize very complex audio
-
-            // Prefer web-compatible codecs
-            if (["aac", "mp3"].includes(codec)) score += 5;
-
-            // Prefer tracks that aren't commentary
-            if (title.includes("commentary") || title.includes("comment"))
-                score -= 10;
-
-            // Prefer default track
-            if (stream.disposition?.default) score += 3;
-
-            return { stream, score };
-        });
-
-        // Sort by score (highest first) and return the best stream
-        scoredStreams.sort((a, b) => b.score - a.score);
-
+        console.log(`🔍 Audio stream selection: Using first audio stream`);
+        console.log(`   Index: ${firstAudioStream.index}`);
+        console.log(`   Channels: ${firstAudioStream.channels || "unknown"}`);
         console.log(
-            `🔍 Audio stream selection:`,
-            scoredStreams.map((s) => ({
-                index: s.stream.index,
-                score: s.score,
-                channels: s.stream.channels,
-                language: s.stream.tags?.language || "unknown",
-                codec: s.stream.codec_name,
-            }))
+            `   Language: ${firstAudioStream.tags?.language || "unknown"}`
         );
+        console.log(`   Codec: ${firstAudioStream.codec_name || "unknown"}`);
 
-        return scoredStreams[0].stream;
+        return firstAudioStream;
     }
 
     async convertToHLS(filePath, movieId, videoInfo) {
