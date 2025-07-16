@@ -17,7 +17,7 @@ STAGE_ENV="${STAGE:-prod}"
 
 # Configuration
 DOCKER_HUB_IMAGE="agwx2/media-library-source-worker:latest"
-IMAGE_NAME="media-worker=$STAGE_ENV"
+IMAGE_NAME="media-worker-$STAGE_ENV"
 CONTAINER_NAME="media-worker-setup-$STAGE_ENV"
 AUTHENTICATED_IMAGE="media-worker-authenticated-$STAGE_ENV"
 CONFIG_DIR="./config"
