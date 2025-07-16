@@ -5,7 +5,7 @@
 STAGE_ENV="${STAGE:-prod}"
 
 IMAGE_NAME="media-worker-authenticated-$STAGE_ENV"
-CONTAINER_NAME="media-worker"
+CONTAINER_NAME="media-worker-$STAGE_ENV"
 CONFIG_DIR="./config"
 
 # Colors for output

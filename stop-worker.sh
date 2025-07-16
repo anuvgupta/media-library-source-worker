@@ -4,7 +4,7 @@
 
 STAGE_ENV="${STAGE:-prod}"
 
-CONTAINER_NAME="media-worker"
+CONTAINER_NAME="media-worker-$STAGE_ENV"
 
 echo "🛑 Stopping media worker..."
 
