@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# setup.sh - Complete setup script for containerized media worker
+# setup-worker.sh - Complete setup script for containerized media worker
 
 set -e
 
@@ -12,6 +12,8 @@ fi
 
 echo "🐳 Media Worker Docker Setup"
 echo "============================="
+
+STAGE_ENV="${STAGE:-dev}"
 
 # Configuration
 DOCKER_HUB_IMAGE="agwx2/media-library-source-worker:latest"
@@ -125,6 +127,7 @@ MSYS_NO_PATHCONV=1 docker run -it \
     -v "$HOST_LIBRARY_PATH:/media" \
     -e TOKEN_FILE=/app/tokens/.worker-tokens.json \
     -e LIBRARY_PATH=/media \
+    -e STAGE="$STAGE_ENV" \
     $IMAGE_NAME bash ./login.sh
 
 # Step 5: Commit the authenticated container

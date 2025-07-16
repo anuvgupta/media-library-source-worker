@@ -2,6 +2,8 @@
 
 # start-worker.sh - Start the media worker in production mode
 
+STAGE_ENV="${STAGE:-dev}"
+
 IMAGE_NAME="media-worker-authenticated"
 CONTAINER_NAME="media-worker"
 CONFIG_DIR="./config"
@@ -71,6 +73,7 @@ MSYS_NO_PATHCONV=1 docker run -d \
     -v "$HOST_LIBRARY_PATH:/media" \
     -e TOKEN_FILE=/app/tokens/.worker-tokens.json \
     -e LIBRARY_PATH=/media \
+    -e STAGE="$STAGE_ENV" \
     $IMAGE_NAME bash ./start.sh
 
 print_success "Worker started successfully!"
