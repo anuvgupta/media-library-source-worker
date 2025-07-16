@@ -244,13 +244,9 @@ class VideoHLSUploader {
                     const videoStream = info.streams.find(
                         (s) => s.codec_type === "video"
                     );
-
-                    // Find ALL audio streams, not just the first one
-                    const audioStreams = info.streams.filter(
+                    const audioStream = info.streams.find(
                         (s) => s.codec_type === "audio"
                     );
-                    const primaryAudioStream =
-                        audioStreams.length > 0 ? audioStreams[0] : null;
 
                     // Extract subtitle streams
                     const subtitleStreams = info.streams.filter(
@@ -268,7 +264,7 @@ class VideoHLSUploader {
                                     )?.[0]
                                     ?.slice(0, 3)
                                     .toLowerCase() ||
-                                `und`,
+                                `und`, // Use 'und' for undefined instead of track_${index}
                             title:
                                 stream.tags?.title || `Subtitle ${index + 1}`,
                             forced: stream.disposition?.forced === 1,
@@ -281,8 +277,8 @@ class VideoHLSUploader {
                         videoCodec: videoStream
                             ? videoStream.codec_name
                             : "unknown",
-                        audioCodec: primaryAudioStream
-                            ? primaryAudioStream.codec_name
+                        audioCodec: audioStream
+                            ? audioStream.codec_name
                             : "unknown",
                         resolution: videoStream
                             ? `${videoStream.width}x${videoStream.height}`
@@ -290,22 +286,10 @@ class VideoHLSUploader {
                         bitrate: parseInt(info.format.bit_rate) || 0,
                         needsReencoding: this.needsReencoding(
                             videoStream,
-                            primaryAudioStream
+                            audioStream
                         ),
                         subtitles: subtitleInfo,
                         hasSubtitles: subtitleInfo.length > 0,
-                        // Add audio stream information
-                        audioStreams: audioStreams.map((stream) => ({
-                            index: stream.index,
-                            codec: stream.codec_name,
-                            channels: stream.channels,
-                            channel_layout: stream.channel_layout,
-                            sample_rate: stream.sample_rate,
-                            language: stream.tags?.language || "und",
-                        })),
-                        primaryAudioIndex: primaryAudioStream
-                            ? primaryAudioStream.index
-                            : 0,
                     };
 
                     resolve(videoInfo);
@@ -353,7 +337,7 @@ class VideoHLSUploader {
         return {
             video: videoNeedsReencoding,
             audio: audioNeedsReencoding,
-            primaryAudioIndex: audioStream ? audioStream.index : 0,
+            primaryAudioIndex: audioStream ? audioStream.index : 0, // Add this
             reason: {
                 video: videoNeedsReencoding
                     ? `${videoCodec} not web-compatible`
@@ -412,93 +396,37 @@ class VideoHLSUploader {
                 ffmpegArgs.push("-c:v", "copy"); // Copy video stream without re-encoding
             }
 
-            // Always map the first video stream
-            ffmpegArgs.push("-map", "0:v:0");
+            // Video stream mapping
+            ffmpegArgs.push("-map", "0:v:0"); // Always map the first video stream
 
-            // Audio handling with multi-channel support
+            // Audio encoding settings
             if (videoInfo.needsReencoding.audio) {
                 console.log(
                     `🔄 Re-encoding audio: ${videoInfo.needsReencoding.reason.audio}`
                 );
-
-                // Map the primary audio stream
-                ffmpegArgs.push("-map", `0:${videoInfo.primaryAudioIndex}`);
-
-                // Get the primary audio stream info
-                const primaryAudioStream = videoInfo.audioStreams.find(
-                    (s) => s.index === videoInfo.primaryAudioIndex
+                ffmpegArgs.push(
+                    "-map",
+                    `0:${videoInfo.needsReencoding.primaryAudioIndex}`, // Select primary audio stream
+                    "-c:a",
+                    "aac", // Re-encode to AAC
+                    "-profile:a",
+                    "aac_low", // Use AAC-LC profile for compatibility
+                    "-ar",
+                    "48000", // Explicit sample rate
+                    "-ac",
+                    "2", // Force stereo output for compatibility
+                    "-b:a",
+                    "128k" // Audio bitrate
                 );
-
-                if (primaryAudioStream) {
-                    console.log(
-                        `🔊 Primary audio: ${
-                            primaryAudioStream.channels
-                        } channels, ${
-                            primaryAudioStream.channel_layout ||
-                            "unknown layout"
-                        }`
-                    );
-
-                    // Enhanced audio re-encoding with proper channel handling
-                    ffmpegArgs.push(
-                        "-c:a",
-                        "aac",
-                        "-profile:a",
-                        "aac_low",
-                        "-ar",
-                        "48000"
-                    );
-
-                    // Handle different channel configurations properly
-                    if (primaryAudioStream.channels > 2) {
-                        // For multi-channel audio, use proper downmixing
-                        console.log(
-                            `🔄 Downmixing ${primaryAudioStream.channels} channels to stereo`
-                        );
-                        ffmpegArgs.push(
-                            "-ac",
-                            "2",
-                            "-af",
-                            "pan=stereo|FL=0.5*FL+0.707*FC+0.5*BL+0.5*SL|FR=0.5*FR+0.707*FC+0.5*BR+0.5*SR",
-                            "-b:a",
-                            "192k" // Higher bitrate for downmixed audio
-                        );
-                    } else {
-                        // For stereo or mono, keep original channel count
-                        ffmpegArgs.push(
-                            "-ac",
-                            primaryAudioStream.channels.toString(),
-                            "-b:a",
-                            "128k"
-                        );
-                    }
-                } else {
-                    // Fallback if we can't find the primary audio stream
-                    console.log(
-                        `⚠️ Could not find primary audio stream, using defaults`
-                    );
-                    ffmpegArgs.push(
-                        "-c:a",
-                        "aac",
-                        "-profile:a",
-                        "aac_low",
-                        "-ar",
-                        "48000",
-                        "-ac",
-                        "2",
-                        "-b:a",
-                        "128k"
-                    );
-                }
             } else {
                 console.log(
                     `✅ Audio codec compatible (${videoInfo.audioCodec}), copying stream`
                 );
                 ffmpegArgs.push(
                     "-map",
-                    `0:${videoInfo.primaryAudioIndex}`,
+                    `0:${videoInfo.needsReencoding.primaryAudioIndex}`, // Select primary audio stream even when copying
                     "-c:a",
-                    "copy"
+                    "copy" // Copy audio stream without re-encoding
                 );
             }
 
@@ -683,13 +611,11 @@ class VideoHLSUploader {
                             outputDir
                         );
                     }
-
                     segmentInfo = {
                         ...segmentInfo,
                         subtitles: videoInfo.subtitles || [],
                         hasSubtitles: videoInfo.hasSubtitles || false,
                     };
-
                     resolve(segmentInfo);
                 } catch (error) {
                     reject(error);
