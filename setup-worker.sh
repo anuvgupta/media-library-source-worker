@@ -13,13 +13,13 @@ fi
 echo "🐳 Media Worker Docker Setup"
 echo "============================="
 
-STAGE_ENV="${STAGE:-dev}"
+STAGE_ENV="${STAGE:-prod}"
 
 # Configuration
 DOCKER_HUB_IMAGE="agwx2/media-library-source-worker:latest"
-IMAGE_NAME="media-worker"
-CONTAINER_NAME="media-worker-setup"
-AUTHENTICATED_IMAGE="media-worker-authenticated"
+IMAGE_NAME="media-worker=$STAGE_ENV"
+CONTAINER_NAME="media-worker-setup-$STAGE_ENV"
+AUTHENTICATED_IMAGE="media-worker-authenticated-$STAGE_ENV"
 CONFIG_DIR="./config"
 
 # Colors for output
@@ -47,8 +47,8 @@ print_error() {
 
 # Step 1: Check if config exists
 print_step "Checking configuration..."
-if [ ! -f "$CONFIG_DIR/dev.json" ]; then
-    print_error "Configuration file not found at $CONFIG_DIR/dev.json"
+if [ ! -f "$CONFIG_DIR/$STAGE_ENV.json" ]; then
+    print_error "Configuration file not found at $CONFIG_DIR/$STAGE_ENV.json"
     print_warning "Please ensure your config file exists before running setup"
     exit 1
 fi
@@ -57,10 +57,10 @@ print_success "Configuration file found"
 # Extract libraryPath from config using jq
 print_step "Reading library path from config..."
 if command -v jq &> /dev/null; then
-    HOST_LIBRARY_PATH=$(jq -r '.libraryPath' "$CONFIG_DIR/dev.json")
+    HOST_LIBRARY_PATH=$(jq -r '.libraryPath' "$CONFIG_DIR/$STAGE_ENV.json")
 else
     # Fallback to grep/sed method
-    HOST_LIBRARY_PATH=$(cat "$CONFIG_DIR/dev.json" | grep -o '"libraryPath"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"libraryPath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    HOST_LIBRARY_PATH=$(cat "$CONFIG_DIR/$STAGE_ENV.json" | grep -o '"libraryPath"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"libraryPath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
 fi
 
 if [ -z "$HOST_LIBRARY_PATH" ] || [ "$HOST_LIBRARY_PATH" = "null" ]; then

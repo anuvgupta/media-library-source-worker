@@ -2,6 +2,8 @@
 
 # stop-worker.sh - Stop the media worker
 
+STAGE_ENV="${STAGE:-prod}"
+
 CONTAINER_NAME="media-worker"
 
 echo "🛑 Stopping media worker..."
