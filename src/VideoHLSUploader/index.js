@@ -244,9 +244,9 @@ class VideoHLSUploader {
                     const videoStream = info.streams.find(
                         (s) => s.codec_type === "video"
                     );
-                    const audioStream = info.streams.find(
-                        (s) => s.codec_type === "audio"
-                    );
+
+                    // UPDATED: Use enhanced audio stream selection
+                    const audioStream = this.findBestAudioStream(info.streams);
 
                     // Extract subtitle streams
                     const subtitleStreams = info.streams.filter(
@@ -264,7 +264,7 @@ class VideoHLSUploader {
                                     )?.[0]
                                     ?.slice(0, 3)
                                     .toLowerCase() ||
-                                `und`, // Use 'und' for undefined instead of track_${index}
+                                `und`,
                             title:
                                 stream.tags?.title || `Subtitle ${index + 1}`,
                             forced: stream.disposition?.forced === 1,
@@ -334,19 +334,148 @@ class VideoHLSUploader {
         const audioNeedsReencoding =
             !compatibleAudioCodecs.includes(audioCodec);
 
+        // NEW: Analyze audio characteristics for compatibility
+        const audioAnalysis = this.analyzeAudioCompatibility(audioStream);
+
         return {
             video: videoNeedsReencoding,
-            audio: audioNeedsReencoding,
-            primaryAudioIndex: audioStream ? audioStream.index : 0, // Add this
+            audio: audioNeedsReencoding || audioAnalysis.needsReencoding,
+            audioAnalysis: audioAnalysis,
+            primaryAudioIndex: audioStream ? audioStream.index : 0,
             reason: {
                 video: videoNeedsReencoding
                     ? `${videoCodec} not web-compatible`
                     : "keeping original",
                 audio: audioNeedsReencoding
                     ? `${audioCodec} -> aac`
+                    : audioAnalysis.needsReencoding
+                    ? audioAnalysis.reason
                     : "keeping original",
             },
         };
+    }
+
+    analyzeAudioCompatibility(audioStream) {
+        if (!audioStream) {
+            return {
+                needsReencoding: false,
+                reason: "no audio stream",
+                shouldDownmix: false,
+                channels: 0,
+            };
+        }
+
+        const channels = audioStream.channels || 0;
+        const channelLayout = audioStream.channel_layout || "";
+        const sampleRate = audioStream.sample_rate || 0;
+
+        let needsReencoding = false;
+        let reason = "";
+        let shouldDownmix = false;
+
+        // Check for problematic channel configurations
+        const problematicLayouts = [
+            "5.1",
+            "5.1(side)",
+            "7.1",
+            "7.1(wide)",
+            "3F2M2R/LFE",
+            "3F2R/LFE",
+            "quad",
+        ];
+
+        // Check if downmixing is needed
+        if (channels > 2) {
+            shouldDownmix = true;
+            needsReencoding = true;
+            reason = `${channels} channels -> stereo downmix`;
+        } else if (
+            problematicLayouts.some((layout) =>
+                channelLayout.toLowerCase().includes(layout.toLowerCase())
+            )
+        ) {
+            shouldDownmix = true;
+            needsReencoding = true;
+            reason = `${channelLayout} -> stereo downmix`;
+        }
+
+        // Check sample rate compatibility
+        const webCompatibleRates = [22050, 44100, 48000];
+        if (sampleRate > 0 && !webCompatibleRates.includes(sampleRate)) {
+            needsReencoding = true;
+            reason = reason
+                ? `${reason}, ${sampleRate}Hz -> 48kHz`
+                : `${sampleRate}Hz -> 48kHz`;
+        }
+
+        return {
+            needsReencoding,
+            reason,
+            shouldDownmix,
+            channels,
+            channelLayout,
+            sampleRate,
+        };
+    }
+
+    findBestAudioStream(streams) {
+        const audioStreams = streams.filter((s) => s.codec_type === "audio");
+
+        if (audioStreams.length === 0) {
+            return null;
+        }
+
+        if (audioStreams.length === 1) {
+            return audioStreams[0];
+        }
+
+        // Score audio streams based on compatibility and preference
+        const scoredStreams = audioStreams.map((stream) => {
+            let score = 0;
+            const language = stream.tags?.language?.toLowerCase() || "";
+            const title = stream.tags?.title?.toLowerCase() || "";
+            const channels = stream.channels || 0;
+            const codec = stream.codec_name?.toLowerCase() || "";
+
+            // Prefer common languages
+            if (language.includes("eng") || language.includes("english"))
+                score += 10;
+            if (language.includes("und") || language === "") score += 5; // undefined often means primary
+
+            // Prefer simpler channel configurations
+            if (channels === 2) score += 8;
+            else if (channels === 1) score += 5;
+            else if (channels <= 6) score += 3;
+            else score -= 5; // Penalize very complex audio
+
+            // Prefer web-compatible codecs
+            if (["aac", "mp3"].includes(codec)) score += 5;
+
+            // Prefer tracks that aren't commentary
+            if (title.includes("commentary") || title.includes("comment"))
+                score -= 10;
+
+            // Prefer default track
+            if (stream.disposition?.default) score += 3;
+
+            return { stream, score };
+        });
+
+        // Sort by score (highest first) and return the best stream
+        scoredStreams.sort((a, b) => b.score - a.score);
+
+        console.log(
+            `🔍 Audio stream selection:`,
+            scoredStreams.map((s) => ({
+                index: s.stream.index,
+                score: s.score,
+                channels: s.stream.channels,
+                language: s.stream.tags?.language || "unknown",
+                codec: s.stream.codec_name,
+            }))
+        );
+
+        return scoredStreams[0].stream;
     }
 
     async convertToHLS(filePath, movieId, videoInfo) {
@@ -399,25 +528,63 @@ class VideoHLSUploader {
             // Video stream mapping
             ffmpegArgs.push("-map", "0:v:0"); // Always map the first video stream
 
-            // Audio encoding settings
+            // ENHANCED: Audio encoding settings with proper downmixing
             if (videoInfo.needsReencoding.audio) {
+                const audioAnalysis = videoInfo.needsReencoding.audioAnalysis;
                 console.log(
                     `🔄 Re-encoding audio: ${videoInfo.needsReencoding.reason.audio}`
                 );
+
+                // Map the selected audio stream
                 ffmpegArgs.push(
                     "-map",
-                    `0:${videoInfo.needsReencoding.primaryAudioIndex}`, // Select primary audio stream
+                    `0:${videoInfo.needsReencoding.primaryAudioIndex}` // Select primary audio stream
+                );
+
+                // Audio codec settings
+                ffmpegArgs.push(
                     "-c:a",
                     "aac", // Re-encode to AAC
                     "-profile:a",
                     "aac_low", // Use AAC-LC profile for compatibility
                     "-ar",
                     "48000", // Explicit sample rate
-                    "-ac",
-                    "2", // Force stereo output for compatibility
                     "-b:a",
                     "128k" // Audio bitrate
                 );
+
+                // ENHANCED: Add proper downmixing if needed
+                if (audioAnalysis.shouldDownmix) {
+                    console.log(
+                        `🔄 Applying audio downmix: ${audioAnalysis.channels} channels (${audioAnalysis.channelLayout}) -> stereo`
+                    );
+
+                    // Use audio filter for proper downmixing
+                    if (
+                        audioAnalysis.channels === 6 ||
+                        audioAnalysis.channelLayout.includes("5.1")
+                    ) {
+                        // Proper 5.1 to stereo downmix with correct channel mapping
+                        // FL=Front Left, FR=Front Right, FC=Front Center,
+                        // BL=Back Left, BR=Back Right, SL=Side Left, SR=Side Right
+                        ffmpegArgs.push(
+                            "-af",
+                            "pan=stereo|FL=FL+0.5*FC+0.707*BL+0.707*SL|FR=FR+0.5*FC+0.707*BR+0.707*SR"
+                        );
+                    } else if (audioAnalysis.channels > 2) {
+                        // Generic multi-channel to stereo downmix
+                        ffmpegArgs.push(
+                            "-af",
+                            "pan=stereo|c0=0.5*c0+0.5*c2|c1=0.5*c1+0.5*c2"
+                        );
+                    }
+
+                    // Force stereo output
+                    ffmpegArgs.push("-ac", "2");
+                } else {
+                    // Still force stereo for safety
+                    ffmpegArgs.push("-ac", "2");
+                }
             } else {
                 console.log(
                     `✅ Audio codec compatible (${videoInfo.audioCodec}), copying stream`
@@ -428,6 +595,44 @@ class VideoHLSUploader {
                     "-c:a",
                     "copy" // Copy audio stream without re-encoding
                 );
+
+                // ENHANCED: Even when copying, ensure stereo output if source is multi-channel
+                const audioAnalysis = videoInfo.needsReencoding.audioAnalysis;
+                if (audioAnalysis.shouldDownmix) {
+                    console.log(
+                        `🔄 Audio copy skipped, downmixing required: ${audioAnalysis.reason}`
+                    );
+                    // Switch to re-encoding with downmix
+                    ffmpegArgs.pop(); // Remove "-c:a", "copy"
+                    ffmpegArgs.push(
+                        "-c:a",
+                        "aac",
+                        "-profile:a",
+                        "aac_low",
+                        "-ar",
+                        "48000",
+                        "-ac",
+                        "2",
+                        "-b:a",
+                        "128k"
+                    );
+
+                    // Apply appropriate downmix filter
+                    if (
+                        audioAnalysis.channels === 6 ||
+                        audioAnalysis.channelLayout.includes("5.1")
+                    ) {
+                        ffmpegArgs.push(
+                            "-af",
+                            "pan=stereo|FL=FL+0.5*FC+0.707*BL+0.707*SL|FR=FR+0.5*FC+0.707*BR+0.707*SR"
+                        );
+                    } else if (audioAnalysis.channels > 2) {
+                        ffmpegArgs.push(
+                            "-af",
+                            "pan=stereo|c0=0.5*c0+0.5*c2|c1=0.5*c1+0.5*c2"
+                        );
+                    }
+                }
             }
 
             // HLS segmentation settings
