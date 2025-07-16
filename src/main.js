@@ -48,8 +48,8 @@ const LIBRARY_PATH = process.env.LIBRARY_PATH
     ? process.env.LIBRARY_PATH
     : CONFIG.libraryPath;
 
-console.log("process.env.LIBRARY_PATH", process.env.LIBRARY_PATH);
-console.log("CONFIG.libraryPath", CONFIG.libraryPath);
+// console.log("process.env.LIBRARY_PATH", process.env.LIBRARY_PATH);
+// console.log("CONFIG.libraryPath", CONFIG.libraryPath);
 
 
 // Token storage file
