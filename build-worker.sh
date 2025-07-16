@@ -16,7 +16,7 @@ echo "============================="
 STAGE_ENV="${STAGE:-prod}"
 
 # Configuration
-IMAGE_NAME="media-worker-$STAGE"
+IMAGE_NAME="media-worker-$STAGE_ENV"
 CONFIG_DIR="./config"
 
 # Colors for output
@@ -44,8 +44,8 @@ print_error() {
 
 # Step 1: Check if config exists
 print_step "Checking configuration..."
-if [ ! -f "$CONFIG_DIR/$STAGE.json" ]; then
-    print_error "Configuration file not found at $CONFIG_DIR/$STAGE.json"
+if [ ! -f "$CONFIG_DIR/$STAGE_ENV.json" ]; then
+    print_error "Configuration file not found at $CONFIG_DIR/$STAGE_ENV.json"
     print_warning "Please ensure your config file exists before running setup"
     exit 1
 fi
