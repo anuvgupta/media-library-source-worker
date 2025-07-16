@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# build.sh - Complete build script for containerized media worker
+# build-worker.sh - Complete build script for containerized media worker
 
 set -e
 
@@ -13,8 +13,10 @@ fi
 echo "🐳 Media Worker Docker Setup"
 echo "============================="
 
+STAGE_ENV="${STAGE:-prod}"
+
 # Configuration
-IMAGE_NAME="media-worker"
+IMAGE_NAME="media-worker-$STAGE"
 CONFIG_DIR="./config"
 
 # Colors for output
@@ -42,8 +44,8 @@ print_error() {
 
 # Step 1: Check if config exists
 print_step "Checking configuration..."
-if [ ! -f "$CONFIG_DIR/dev.json" ]; then
-    print_error "Configuration file not found at $CONFIG_DIR/dev.json"
+if [ ! -f "$CONFIG_DIR/$STAGE.json" ]; then
+    print_error "Configuration file not found at $CONFIG_DIR/$STAGE.json"
     print_warning "Please ensure your config file exists before running setup"
     exit 1
 fi
