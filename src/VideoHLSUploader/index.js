@@ -7,6 +7,9 @@ const { promisify } = require("util");
 const { Upload } = require("@aws-sdk/lib-storage");
 const { ListObjectsV2Command } = require("@aws-sdk/client-s3");
 
+// const AUDIO_REENCODE_BITRATE = "128k";
+const AUDIO_REENCODE_BITRATE = "256k";
+
 class VideoHLSUploader {
     constructor(options = {}) {
         // Required parameters
@@ -542,7 +545,7 @@ class VideoHLSUploader {
                     "-ar",
                     "48000", // Explicit sample rate
                     "-b:a",
-                    "128k" // Audio bitrate
+                    AUDIO_REENCODE_BITRATE // Audio bitrate
                 );
 
                 // ENHANCED: Add proper downmixing if needed
@@ -606,7 +609,7 @@ class VideoHLSUploader {
                         "-ac",
                         "2",
                         "-b:a",
-                        "128k"
+                        AUDIO_REENCODE_BITRATE
                     );
 
                     // Apply appropriate downmix filter
