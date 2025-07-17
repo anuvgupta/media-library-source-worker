@@ -5,8 +5,8 @@ module.exports = {
             script: "./src/main.js",
             args: "worker",
             // instances: "max",
-            instances: 5,
-            // instances: 1,
+            // instances: 5,
+            instances: 1,
             env: {
                 NODE_ENV: "development",
             },
