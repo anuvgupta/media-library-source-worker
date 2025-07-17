@@ -78,8 +78,8 @@ MSYS_NO_PATHCONV=1 docker run -d \
 
 print_success "Worker started successfully!"
 echo ""
-echo "📊 Useful commands:"
-echo "  docker logs $CONTAINER_NAME              # View logs"
-echo "  docker logs -f $CONTAINER_NAME           # Follow logs"
-echo "  docker stop $CONTAINER_NAME              # Stop worker"
-echo "  docker exec -it $CONTAINER_NAME /bin/bash # Access container"
+# echo "📊 Useful commands:"
+# echo "  docker logs $CONTAINER_NAME              # View logs"
+# echo "  docker logs -f $CONTAINER_NAME           # Follow logs"
+# echo "  docker stop $CONTAINER_NAME              # Stop worker"
+# echo "  docker exec -it $CONTAINER_NAME /bin/bash # Access container"
