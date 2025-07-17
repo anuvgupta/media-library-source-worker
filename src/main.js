@@ -48,6 +48,15 @@ const LIBRARY_PATH = process.env.LIBRARY_PATH
 // Token storage file
 const TOKEN_FILE = path.join(__dirname, "../.worker-tokens.json");
 
+// Utils
+const utf8ToBase64 = (utf8String) => {
+    return Buffer.from(utf8String, "utf8").toString("base64");
+};
+const base64ToUtf8 = (base64String) => {
+    return Buffer.from(base64String, "base64").toString("utf8");
+};
+
+// Media worker monolith class
 class MediaWorker {
     constructor() {
         this.cognitoIdentityProvider = new CognitoIdentityProviderClient({
@@ -446,7 +455,7 @@ class MediaWorker {
         }
 
         const libraryPath = LIBRARY_PATH; // Use from config/env
-        const moviePathInLibrary = atob(messageBody.movieId);
+        const moviePathInLibrary = base64ToUtf8(messageBody.movieId);
         const moviePath = `${libraryPath}/${moviePathInLibrary}`;
 
         if (!fs.existsSync(moviePath)) {
@@ -1508,7 +1517,7 @@ class MediaWorker {
             );
 
             const libraryPath = LIBRARY_PATH;
-            const moviePathInLibrary = atob(messageBody.movieId);
+            const moviePathInLibrary = base64ToUtf8(messageBody.movieId);
             const moviePath = `${libraryPath}/${moviePathInLibrary}`;
 
             if (!fs.existsSync(moviePath)) {
