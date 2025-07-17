@@ -248,29 +248,60 @@ class VideoHLSUploader {
                     // UPDATED: Use enhanced audio stream selection
                     const audioStream = this.findBestAudioStream(info.streams);
 
-                    // Extract subtitle streams
+                    // Extract subtitle streams - FILTER FOR ENGLISH ONLY
                     const subtitleStreams = info.streams.filter(
                         (s) => s.codec_type === "subtitle"
                     );
-                    const subtitleInfo = subtitleStreams.map(
+
+                    // Filter for English subtitles only
+                    const englishSubtitles = subtitleStreams.filter(
+                        (stream) => {
+                            const language =
+                                stream.tags?.language?.toLowerCase() || "";
+                            const title =
+                                stream.tags?.title?.toLowerCase() || "";
+
+                            // Check for English language codes and common English indicators
+                            const isEnglish =
+                                language === "eng" ||
+                                language === "en" ||
+                                language === "english" ||
+                                title.includes("english") ||
+                                title.includes("eng") ||
+                                // If no language specified, check if it's the first subtitle (often English)
+                                (!language &&
+                                    !title &&
+                                    stream.index === subtitleStreams[0]?.index);
+
+                            return isEnglish;
+                        }
+                    );
+
+                    const subtitleInfo = englishSubtitles.map(
                         (stream, index) => ({
                             index: stream.index,
                             codec: stream.codec_name,
                             language:
-                                stream.tags?.language ||
-                                stream.tags?.title
-                                    ?.match(
-                                        /\b(eng|english|spa|spanish|fre|french|ger|german)\b/i
-                                    )?.[0]
-                                    ?.slice(0, 3)
-                                    .toLowerCase() ||
-                                `und`,
+                                stream.tags?.language?.toLowerCase() || "eng",
                             title:
-                                stream.tags?.title || `Subtitle ${index + 1}`,
+                                stream.tags?.title ||
+                                `English Subtitle ${index + 1}`,
                             forced: stream.disposition?.forced === 1,
                             default: stream.disposition?.default === 1,
                         })
                     );
+
+                    console.log(
+                        `🔤 Found ${subtitleStreams.length} total subtitle tracks, ${englishSubtitles.length} English tracks will be extracted`
+                    );
+
+                    if (subtitleInfo.length > 0) {
+                        console.log(
+                            `   English subtitles: ${subtitleInfo
+                                .map((s) => `${s.title} (${s.language})`)
+                                .join(", ")}`
+                        );
+                    }
 
                     const videoInfo = {
                         duration: parseFloat(info.format.duration),
@@ -288,8 +319,8 @@ class VideoHLSUploader {
                             videoStream,
                             audioStream
                         ),
-                        subtitles: subtitleInfo,
-                        hasSubtitles: subtitleInfo.length > 0,
+                        subtitles: subtitleInfo, // Now only English subtitles
+                        hasSubtitles: subtitleInfo.length > 0, // Based on English subtitles only
                     };
 
                     resolve(videoInfo);
