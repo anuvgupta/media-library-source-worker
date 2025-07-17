@@ -3,7 +3,6 @@
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
-const { promisify } = require("util");
 const { Upload } = require("@aws-sdk/lib-storage");
 const { ListObjectsV2Command } = require("@aws-sdk/client-s3");
 
