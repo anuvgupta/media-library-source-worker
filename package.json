@@ -12,6 +12,7 @@
         "stop": "bash ./stop.sh",
         "login": "bash ./login.sh",
         "build": "npm run build-worker",
+        "logs": "npm run logs-worker",
         "launch": "npm run launch-worker",
         "build-worker": "bash ./build-worker.sh",
         "setup-worker": "bash ./setup-worker.sh",
