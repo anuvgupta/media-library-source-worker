@@ -1871,6 +1871,8 @@ class MediaWorker {
                 `metadata?${queryParams.toString()}`
             );
 
+            console.log(`   TMDB API response for ${movie.name}:`, result);
+
             if (!result.results || result.results.length === 0) {
                 console.log(`   No TMDB results for: ${movie.name}`);
                 return;
