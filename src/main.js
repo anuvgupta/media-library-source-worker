@@ -1249,7 +1249,7 @@ class MediaWorker {
             console.log(`Found ${collectionFolders.length} collections`);
 
             for (const collectionName of collectionFolders) {
-                console.log(`\nScanning collection: ${collectionName}`);
+                // console.log(`\nScanning collection: ${collectionName}`);
                 const collectionPath = path.join(libraryPath, collectionName);
                 collections[collectionName] = [];
 
@@ -1259,9 +1259,9 @@ class MediaWorker {
                     .filter((dirent) => dirent.isDirectory())
                     .map((dirent) => dirent.name);
 
-                console.log(
-                    `  Found ${movieFolders.length} movies in ${collectionName}`
-                );
+                // console.log(
+                //     `  Found ${movieFolders.length} movies in ${collectionName}`
+                // );
 
                 for (const movieFolderName of movieFolders) {
                     const moviePath = path.join(
