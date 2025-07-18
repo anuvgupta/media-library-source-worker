@@ -1271,9 +1271,9 @@ class MediaWorker {
                     const { name, year } =
                         this.parseMovieNameAndYear(movieFolderName);
 
-                    console.log(
-                        `    Processing: ${name} (${year || "Unknown Year"})`
-                    );
+                    // console.log(
+                    //     `    Processing: ${name} (${year || "Unknown Year"})`
+                    // );
 
                     try {
                         // Find video files in the movie folder
@@ -1310,7 +1310,7 @@ class MediaWorker {
                             continue;
                         }
 
-                        console.log(`      Found video file: ${videoFile}`);
+                        // console.log(`      Found video file: ${videoFile}`);
 
                         // Get file size
                         const stats = fs.statSync(videoFilePath);
@@ -1337,7 +1337,7 @@ class MediaWorker {
                                     );
                                     runtime =
                                         this.formatRuntime(durationSeconds);
-                                    console.log(`        Duration: ${runtime}`);
+                                    // console.log(`        Duration: ${runtime}`);
                                 }
 
                                 // Extract quality
@@ -1345,15 +1345,15 @@ class MediaWorker {
                                     quality = this.extractQuality(
                                         metadata.streams
                                     );
-                                    console.log(`        Quality: ${quality}`);
+                                    // console.log(`        Quality: ${quality}`);
                                 }
                             } catch (metadataError) {
                                 console.log(
                                     `        ffprobe failed: ${metadataError.message}`
                                 );
-                                console.log(
-                                    `        Falling back to filename-based quality detection`
-                                );
+                                // console.log(
+                                //     `        Falling back to filename-based quality detection`
+                                // );
                                 quality =
                                     this.extractQualityFromFilename(videoFile);
                             }
@@ -1361,14 +1361,14 @@ class MediaWorker {
                             // Fallback to filename-based quality detection
                             quality =
                                 this.extractQualityFromFilename(videoFile);
-                            console.log(
-                                `        Quality (from filename): ${quality}`
-                            );
+                            // console.log(
+                            //     `        Quality (from filename): ${quality}`
+                            // );
                         }
 
-                        console.log(
-                            `      Final metadata: ${runtime}, ${quality}, ${fileSize}`
-                        );
+                        // console.log(
+                        //     `      Final metadata: ${runtime}, ${quality}, ${fileSize}`
+                        // );
 
                         // Add movie to collection
                         collections[collectionName].push({
