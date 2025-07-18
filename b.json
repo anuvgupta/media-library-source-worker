@@ -13,6 +13,7 @@
         "logs-worker": "npm run logs-worker",
         "start-worker": "npm run start-worker",
         "stop-worker": "npm run stop-worker",
+        "restart-worker": "npm run restart-worker",
         "launch-worker": "npm run launch-worker",
         "clean": "npm run clean",
         "install": "npm install"

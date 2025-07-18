@@ -19,6 +19,7 @@
         "logs-worker": "bash ./logs-worker.sh -f",
         "start-worker": "bash ./start-worker.sh",
         "stop-worker": "bash ./stop-worker.sh",
+        "restart-worker": "bash ./stop-worker.sh && bash ./start-worker.sh",
         "launch-worker": "npm run build-worker && npm run stop-worker && npm run setup-worker && npm run start-worker",
         "clean": "echo \"Error: no clean a specified\" && exit 1",
         "test": "echo \"Error: no test specified\" && exit 1"
