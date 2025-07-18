@@ -32,6 +32,10 @@ const {
     ListObjectsV2Command,
 } = require("@aws-sdk/client-s3");
 const { Upload } = require("@aws-sdk/lib-storage");
+const {
+    CloudFrontClient,
+    CreateInvalidationCommand,
+} = require("@aws-sdk/client-cloudfront");
 
 const { VideoHLSUploader } = require("./VideoHLSUploader/index.js");
 
@@ -68,6 +72,7 @@ class MediaWorker {
         this.s3 = null; // Will be initialized after authentication
         this.sqs = null; // Will be initialized after authentication
         // this.dynamodb = null; // Will be initialized after authentication
+        this.cloudfront = null;
         this.hlsUploader = null; // Will be initialized after S3 client is ready
         this.tokens = this.loadTokens();
         this.credentials = null;
@@ -877,6 +882,15 @@ class MediaWorker {
             // });
             // this.dynamodb = DynamoDBDocumentClient.from(dynamodbClient);
 
+            this.cloudfront = new CloudFrontClient({
+                region: "us-east-1", // CloudFront APIs are only available in us-east-1
+                credentials: {
+                    accessKeyId: credentials.accessKeyId,
+                    secretAccessKey: credentials.secretAccessKey,
+                    sessionToken: credentials.sessionToken,
+                },
+            });
+
             // Initialize HLS uploader after S3 client is ready
             this.initializeHLSUploader();
 
@@ -889,6 +903,50 @@ class MediaWorker {
         } catch (error) {
             console.error("Failed to get AWS credentials:", error.message);
             throw error;
+        }
+    }
+
+    async invalidateCloudFrontCache(paths) {
+        if (!this.cloudfront || !CONFIG.cloudfrontDistributionId) {
+            console.warn(
+                "CloudFront client not initialized or distribution ID not configured"
+            );
+            return;
+        }
+
+        try {
+            console.log(
+                `🔄 Invalidating CloudFront cache for ${paths.length} paths...`
+            );
+
+            const invalidationParams = {
+                DistributionId: CONFIG.cloudfrontDistributionId,
+                InvalidationBatch: {
+                    Paths: {
+                        Quantity: paths.length,
+                        Items: paths,
+                    },
+                    CallerReference: `poster-upload-${Date.now()}-${Math.random()
+                        .toString(36)
+                        .substr(2, 9)}`,
+                },
+            };
+
+            const command = new CreateInvalidationCommand(invalidationParams);
+            const result = await this.cloudfront.send(command);
+
+            console.log(
+                `✅ CloudFront invalidation created: ${result.Invalidation.Id}`
+            );
+            console.log(`   Status: ${result.Invalidation.Status}`);
+
+            return result;
+        } catch (error) {
+            console.error(
+                "❌ Failed to create CloudFront invalidation:",
+                error.message
+            );
+            // Don't throw - invalidation failure shouldn't break poster upload
         }
     }
 
@@ -1756,6 +1814,8 @@ class MediaWorker {
         this.isProcessingPosters = true;
         console.log("🎬 Starting poster processing...");
 
+        const uploadedPosters = []; // Track uploaded posters
+
         try {
             const ownerIdentityId = this.getIdentityId();
 
@@ -1791,14 +1851,23 @@ class MediaWorker {
                 return;
             }
 
-            // Process movies in batches to avoid overwhelming TMDB API
+            // Process movies in batches
             const batchSize = this.posterProcessingConcurrency;
             for (let i = 0; i < allMovies.length; i += batchSize) {
                 const batch = allMovies.slice(i, i + batchSize);
 
-                await Promise.all(
-                    batch.map((movie) => this.processMoviePoster(movie))
+                const batchResults = await Promise.allSettled(
+                    batch.map((movie) =>
+                        this.processMoviePosterWithTracking(movie)
+                    )
                 );
+
+                // Collect successful uploads for invalidation
+                batchResults.forEach((result, index) => {
+                    if (result.status === "fulfilled" && result.value) {
+                        uploadedPosters.push(result.value);
+                    }
+                });
 
                 // Delay between batches
                 if (i + batchSize < allMovies.length) {
@@ -1808,12 +1877,36 @@ class MediaWorker {
                 }
             }
 
+            // Batch invalidate all uploaded posters
+            if (uploadedPosters.length > 0) {
+                console.log(
+                    `🔄 Invalidating CloudFront cache for ${uploadedPosters.length} posters...`
+                );
+                await this.invalidateCloudFrontCache(uploadedPosters);
+            }
+
             console.log("✅ Poster processing completed");
         } catch (error) {
             console.error("❌ Poster processing failed:", error);
             throw error;
         } finally {
             this.isProcessingPosters = false;
+        }
+    }
+
+    async processMoviePosterWithTracking(movie) {
+        try {
+            await this.processMoviePoster(movie);
+
+            // Return the cache path for invalidation
+            const ownerIdentityId = this.getIdentityId();
+            return `/${CONFIG.posterUploadPath}/${ownerIdentityId}/poster_${movie.movieId}.jpg`;
+        } catch (error) {
+            console.warn(
+                `⚠️ Failed to process poster for ${movie.name}:`,
+                error.message
+            );
+            return null;
         }
     }
 
