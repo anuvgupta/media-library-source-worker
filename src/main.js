@@ -1879,7 +1879,7 @@ class MediaWorker {
             }
 
             const resultJson = await response.json();
-            console.log(`   TMDB API response for ${movie.name}:`, resultJson);
+            // console.log(`   TMDB API response for ${movie.name}:`, resultJson);
             if (
                 !resultJson ||
                 !resultJson.results ||
@@ -1913,7 +1913,7 @@ class MediaWorker {
     async downloadAndUploadPoster(movieId, posterPath) {
         try {
             // Use w500 size for good quality but reasonable file size
-            const posterUrl = `${CONFIG.tmdbPosterUrlPrefix500}${posterPath}`;
+            const posterUrl = `${CONFIG.tmdbImageBaseUrl}${posterPath}`;
 
             console.log(`📥 Downloading poster: ${posterUrl}`);
 
