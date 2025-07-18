@@ -1878,9 +1878,8 @@ class MediaWorker {
                 );
             }
 
-            console.log(`   TMDB API response for ${movie.name}:`, result.json);
-
             const resultJson = await response.json();
+            console.log(`   TMDB API response for ${movie.name}:`, resultJson);
             if (
                 !resultJson ||
                 !resultJson.results ||
