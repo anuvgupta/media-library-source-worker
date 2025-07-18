@@ -1866,15 +1866,10 @@ class MediaWorker {
                 queryParams.append("year", movie.year);
             }
 
-            const response = await fetch(
-                `${CONFIG.apiEndpoint}/metadata?${queryParams.toString()}`
+            const result = await this.makeAuthenticatedAPIRequest(
+                "GET",
+                `metadata?${queryParams.toString()}`
             );
-
-            if (!response.ok) {
-                throw new Error(`TMDB API request failed: ${response.status}`);
-            }
-
-            const result = await response.json();
 
             if (!result.results || result.results.length === 0) {
                 console.log(`   No TMDB results for: ${movie.name}`);
