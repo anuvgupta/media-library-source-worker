@@ -1866,19 +1866,31 @@ class MediaWorker {
                 queryParams.append("year", movie.year);
             }
 
-            const result = await this.makeAuthenticatedAPIRequest(
+            const response = await this.makeAuthenticatedAPIRequest(
                 "GET",
                 `metadata?${queryParams.toString()}`
             );
 
-            console.log(`   TMDB API response for ${movie.name}:`, result);
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.warn(
+                    `Failed to get metadata: ${response.status} ${errorText}`
+                );
+            }
 
-            if (!result.results || result.results.length === 0) {
+            console.log(`   TMDB API response for ${movie.name}:`, result.json);
+
+            const resultJson = await response.json();
+            if (
+                !resultJson ||
+                !resultJson.results ||
+                resultJson.results.length === 0
+            ) {
                 console.log(`   No TMDB results for: ${movie.name}`);
                 return;
             }
 
-            const movieData = result.results[0];
+            const movieData = resultJson.results[0];
             if (!movieData.poster_path) {
                 console.log(`   No poster available for: ${movie.name}`);
                 return;
