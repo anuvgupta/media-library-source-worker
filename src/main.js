@@ -78,6 +78,10 @@ class MediaWorker {
         this.activeUploads = new Map(); // Track active uploads
         this.uploadQueue = []; // Queue for pending uploads
         this.processingUploads = 0; // Current number of processing uploads
+        this.posterDownloadQueue = [];
+        this.isProcessingPosters = false;
+        this.tmdbApiDelay = 500; // 500ms between API calls to be respectful
+        this.posterProcessingConcurrency = 2; // Process 2 posters at a time
     }
 
     // Initialize HLS uploader after S3 client is ready
@@ -292,6 +296,15 @@ class MediaWorker {
         }
 
         console.log("✅ Library refresh completed");
+
+        // Start poster processing in background (non-blocking)
+        this.processMoviePosters(libraryData).catch((error) => {
+            console.warn(
+                "Poster processing failed (non-critical):",
+                error.message
+            );
+        });
+
         return libraryData;
     }
 
@@ -1732,6 +1745,257 @@ class MediaWorker {
             console.warn("Failed to update upload status:", error.message);
             // Don't throw - status updates shouldn't break the upload process
         }
+    }
+
+    async processMoviePosters(libraryData) {
+        if (this.isProcessingPosters) {
+            console.log("Poster processing already in progress, skipping");
+            return;
+        }
+
+        this.isProcessingPosters = true;
+        console.log("🎬 Starting poster processing...");
+
+        try {
+            const ownerIdentityId = this.getIdentityId();
+
+            // Get existing posters from S3
+            const existingPosters = await this.getExistingPosters(
+                ownerIdentityId
+            );
+            console.log(`📋 Found ${existingPosters.size} existing posters`);
+
+            // Flatten all movies and filter out those that already have posters
+            const allMovies = [];
+            Object.keys(libraryData).forEach((collection) => {
+                libraryData[collection].forEach((movie) => {
+                    const movieId = utf8ToBase64(
+                        `${collection}/${movie.name} (${movie.year})/${movie.videoFile}`
+                    );
+                    if (!existingPosters.has(movieId)) {
+                        allMovies.push({
+                            ...movie,
+                            collection,
+                            movieId,
+                        });
+                    }
+                });
+            });
+
+            console.log(
+                `🎬 Processing posters for ${allMovies.length} movies (${existingPosters.size} already cached)`
+            );
+
+            if (allMovies.length === 0) {
+                console.log("✅ All movie posters already cached");
+                return;
+            }
+
+            // Process movies in batches to avoid overwhelming TMDB API
+            const batchSize = this.posterProcessingConcurrency;
+            for (let i = 0; i < allMovies.length; i += batchSize) {
+                const batch = allMovies.slice(i, i + batchSize);
+
+                await Promise.all(
+                    batch.map((movie) => this.processMoviePoster(movie))
+                );
+
+                // Delay between batches
+                if (i + batchSize < allMovies.length) {
+                    await new Promise((resolve) =>
+                        setTimeout(resolve, this.tmdbApiDelay)
+                    );
+                }
+            }
+
+            console.log("✅ Poster processing completed");
+        } catch (error) {
+            console.error("❌ Poster processing failed:", error);
+            throw error;
+        } finally {
+            this.isProcessingPosters = false;
+        }
+    }
+
+    async getExistingPosters(ownerIdentityId) {
+        try {
+            const listParams = {
+                Bucket: CONFIG.posterBucketName,
+                Prefix: `${CONFIG.posterUploadPath}/${ownerIdentityId}/`,
+                MaxKeys: 5000,
+            };
+
+            const listResult = await this.s3.send(
+                new ListObjectsV2Command(listParams)
+            );
+            const existingPosters = new Set();
+
+            if (listResult.Contents && listResult.Contents.length > 0) {
+                for (const object of listResult.Contents) {
+                    // Extract movieId from filename: poster_<movieId>.jpg
+                    const filename = object.Key.split("/").pop();
+                    const match = filename.match(
+                        /^poster_(.+)\.(jpg|jpeg|png|webp)$/i
+                    );
+                    if (match) {
+                        existingPosters.add(match[1]);
+                    }
+                }
+            }
+
+            return existingPosters;
+        } catch (error) {
+            console.warn("Failed to check existing posters:", error.message);
+            return new Set();
+        }
+    }
+
+    async processMoviePoster(movie) {
+        try {
+            console.log(
+                `🎬 Processing poster for: ${movie.name} (${movie.year})`
+            );
+
+            // Clean title for search (use the same logic as frontend)
+            const cleanedTitle = this.cleanMovieTitleForSearch(movie.name);
+
+            // Search TMDB via API Gateway
+            const queryParams = new URLSearchParams();
+            queryParams.append("query", cleanedTitle);
+            if (movie.year) {
+                queryParams.append("year", movie.year);
+            }
+
+            const response = await fetch(
+                `${CONFIG.apiEndpoint}/metadata?${queryParams.toString()}`
+            );
+
+            if (!response.ok) {
+                throw new Error(`TMDB API request failed: ${response.status}`);
+            }
+
+            const result = await response.json();
+
+            if (!result.results || result.results.length === 0) {
+                console.log(`   No TMDB results for: ${movie.name}`);
+                return;
+            }
+
+            const movieData = result.results[0];
+            if (!movieData.poster_path) {
+                console.log(`   No poster available for: ${movie.name}`);
+                return;
+            }
+
+            // Download and upload poster
+            await this.downloadAndUploadPoster(
+                movie.movieId,
+                movieData.poster_path
+            );
+
+            console.log(`✅ Poster processed for: ${movie.name}`);
+        } catch (error) {
+            console.warn(
+                `⚠️ Failed to process poster for ${movie.name}:`,
+                error.message
+            );
+        }
+    }
+
+    async downloadAndUploadPoster(movieId, posterPath) {
+        try {
+            // Use w500 size for good quality but reasonable file size
+            const posterUrl = `${CONFIG.tmdbPosterUrlPrefix500}${posterPath}`;
+
+            console.log(`📥 Downloading poster: ${posterUrl}`);
+
+            // Download poster image
+            const response = await fetch(posterUrl);
+            if (!response.ok) {
+                throw new Error(
+                    `Failed to download poster: ${response.status}`
+                );
+            }
+
+            const posterBuffer = await response.arrayBuffer();
+            const contentType =
+                response.headers.get("content-type") || "image/jpeg";
+
+            // Determine file extension
+            const extension = contentType.includes("png") ? "png" : "jpg";
+            const filename = `poster_${movieId}.${extension}`;
+
+            // Upload to S3
+            const ownerIdentityId = this.getIdentityId();
+            const s3Key = `${CONFIG.posterUploadPath}/${ownerIdentityId}/${filename}`;
+
+            const uploadParams = {
+                Bucket: CONFIG.posterBucketName,
+                Key: s3Key,
+                Body: new Uint8Array(posterBuffer),
+                ContentType: contentType,
+                CacheControl: "public, max-age=31536000", // Cache for 1 year
+                Metadata: {
+                    movieId: movieId,
+                    source: "tmdb",
+                    originalPath: posterPath,
+                },
+            };
+
+            const upload = new Upload({
+                client: this.s3,
+                params: uploadParams,
+            });
+
+            await upload.done();
+            console.log(`📦 Poster uploaded: ${filename}`);
+        } catch (error) {
+            console.error(
+                `❌ Failed to download/upload poster for ${movieId}:`,
+                error
+            );
+            throw error;
+        }
+    }
+
+    cleanMovieTitleForSearch(title) {
+        if (!title) return title;
+
+        let cleanedTitle = title;
+
+        // Replace em dashes (–) with regular hyphens (-)
+        cleanedTitle = cleanedTitle.replace(/–/g, "-");
+
+        // Remove problematic strings that interfere with search
+        const problematicStrings = [
+            /\s*[-–]\s*Theatrical\s+Cut\s*/gi,
+            /\s*[-–]\s*Theater\s+Cut\s*/gi,
+            /\s*[-–]\s*Extended\s+Cut\s*/gi,
+            /\s*[-–]\s*Ultimate\s+Cut\s*/gi,
+            /\s*[-–]\s*Final\s+Cut\s*/gi,
+            /\s*[-–]\s*Unrated\s+Cut\s*/gi,
+            /\s*[-–]\s*Uncut\s*/gi,
+            /\s*[-–]\s*Remastered\s*/gi,
+            /\s*[-–]\s*Special\s+Edition\s*/gi,
+            /\s*[-–]\s*Anniversary\s+Edition\s*/gi,
+            /\s*[-–]\s*Collector's\s+Edition\s*/gi,
+            /\s*[-–]\s*Limited\s+Edition\s*/gi,
+            /\s*[-–]\s*Criterion\s+Collection\s*/gi,
+            /\s*\(.*?Cut\)\s*/gi,
+            /\s*\(.*?Edition\)\s*/gi,
+            /\s*\(Remastered\)\s*/gi,
+            /\s*\(Unrated\)\s*/gi,
+            /\s*\(Uncut\)\s*/gi,
+        ];
+
+        problematicStrings.forEach((pattern) => {
+            cleanedTitle = cleanedTitle.replace(pattern, "");
+        });
+
+        cleanedTitle = cleanedTitle.replace(/\s+/g, " ").trim();
+        cleanedTitle = cleanedTitle.replace(/[,;:.!?]+$/, "");
+
+        return cleanedTitle;
     }
 }
 
