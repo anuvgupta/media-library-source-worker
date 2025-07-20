@@ -1225,7 +1225,11 @@ class VideoHLSUploader {
         );
 
         const results = await Promise.all(subtitlePromises);
-        return results.filter((result) => result !== null);
+        const successfulResults = results.filter((result) => result !== null);
+        console.log(
+            `✅ Successfully extracted ${successfulResults.length} subtitle tracks from video`
+        );
+        return successfulResults;
     }
 
     async searchPodnapisiSubtitles(movieTitle, year) {
@@ -1267,58 +1271,108 @@ class VideoHLSUploader {
         }
     }
 
-    async downloadPodnapisiSubtitle(downloadUrl, outputPath, index) {
+    async searchAndDownloadPodnapisiSubtitles(movieId, outputDir) {
         try {
-            const fullUrl = downloadUrl.startsWith("http")
-                ? downloadUrl
-                : `https://www.podnapisi.net${downloadUrl}`;
+            // Extract movie title and year from movieId (base64 encoded path)
+            const moviePath = base64ToUtf8(movieId);
+            const pathParts = moviePath.split("/");
+            const movieFolderName = pathParts[pathParts.length - 2]; // Get movie folder name
+            const titleMatch = movieFolderName.match(/^(.+?)\s*\((\d{4})\)$/);
 
-            console.log(`📥 Downloading subtitle ${index + 1}: ${fullUrl}`);
+            const movieTitle = titleMatch
+                ? titleMatch[1].trim()
+                : movieFolderName;
+            const year = titleMatch ? titleMatch[2] : null;
 
-            const response = await fetch(fullUrl, {
-                headers: {
-                    "User-Agent":
-                        "Mozilla/5.0 (compatible; SubtitleDownloader/1.0)",
-                },
+            const subtitles = await this.searchPodnapisiSubtitles(
+                movieTitle,
+                year
+            );
+
+            if (subtitles.length === 0) {
+                console.log(
+                    `ℹ️ No English subtitles found on Podnapisi for: ${movieTitle}`
+                );
+                return;
+            }
+
+            console.log(
+                `📥 Downloading ${subtitles.length} subtitles from Podnapisi in parallel...`
+            );
+
+            // Create download promises for parallel execution
+            const downloadPromises = subtitles.map(async (subtitle, index) => {
+                const outputFilename = `subtitle_eng_podnapisi_${index}.vtt`;
+                const outputPath = path.join(outputDir, outputFilename);
+
+                try {
+                    const success = await this.downloadPodnapisiSubtitle(
+                        subtitle.download,
+                        outputPath,
+                        index
+                    );
+                    return {
+                        index,
+                        filename: outputFilename,
+                        success,
+                        error: null,
+                    };
+                } catch (error) {
+                    return {
+                        index,
+                        filename: outputFilename,
+                        success: false,
+                        error: error.message,
+                    };
+                }
             });
 
-            if (!response.ok) {
-                throw new Error(`Download failed: ${response.status}`);
-            }
+            // Execute all downloads in parallel
+            const results = await Promise.allSettled(downloadPromises);
 
-            const buffer = await response.arrayBuffer();
-            const uint8Array = new Uint8Array(buffer);
+            // Process results
+            let downloadCount = 0;
+            let errorCount = 0;
 
-            // Handle ZIP files (most Podnapisi downloads are zipped)
-            if (uint8Array[0] === 0x50 && uint8Array[1] === 0x4b) {
-                const AdmZip = require("adm-zip");
-                const zip = new AdmZip(Buffer.from(uint8Array));
-                const entries = zip.getEntries();
-
-                const srtEntry = entries.find(
-                    (entry) =>
-                        entry.entryName.toLowerCase().endsWith(".srt") ||
-                        entry.entryName.toLowerCase().endsWith(".sub")
-                );
-
-                if (srtEntry) {
-                    const srtContent = srtEntry.getData().toString("utf8");
-                    const vttContent = this.convertSrtToVtt(srtContent);
-                    fs.writeFileSync(outputPath, vttContent, "utf8");
-                    return true;
+            results.forEach((result, index) => {
+                if (result.status === "fulfilled") {
+                    const downloadResult = result.value;
+                    if (downloadResult.success) {
+                        downloadCount++;
+                        console.log(
+                            `✅ Downloaded: ${downloadResult.filename}`
+                        );
+                    } else {
+                        errorCount++;
+                        console.warn(
+                            `❌ Failed to download subtitle ${index + 1}: ${
+                                downloadResult.error || "Unknown error"
+                            }`
+                        );
+                    }
+                } else {
+                    errorCount++;
+                    console.warn(
+                        `❌ Download promise failed for subtitle ${
+                            index + 1
+                        }: ${result.reason}`
+                    );
                 }
-            } else {
-                // Direct SRT file
-                const content = Buffer.from(uint8Array).toString("utf8");
-                const vttContent = this.convertSrtToVtt(content);
-                fs.writeFileSync(outputPath, vttContent, "utf8");
-                return true;
+            });
+
+            if (downloadCount > 0) {
+                console.log(
+                    `🎉 Successfully downloaded ${downloadCount} subtitles from Podnapisi`
+                );
             }
 
-            return false;
+            if (errorCount > 0) {
+                console.warn(`⚠️ ${errorCount} subtitle downloads failed`);
+            }
         } catch (error) {
-            console.warn(`⚠️ Failed to download subtitle: ${error.message}`);
-            return false;
+            console.warn(
+                `⚠️ Podnapisi subtitle download failed: ${error.message}`
+            );
         }
     }
 
