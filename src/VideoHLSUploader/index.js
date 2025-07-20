@@ -1241,7 +1241,9 @@ class VideoHLSUploader {
                 searchQuery
             )}&language=en&sort=ratings.combined&order=desc`;
 
-            console.log(`🔍 Searching Podnapisi for: ${searchQuery}`);
+            console.log(
+                `🔍 Searching Podnapisi for: ${searchQuery} via url ${url}`
+            );
 
             const response = await fetch(url, {
                 headers: {
@@ -1256,6 +1258,10 @@ class VideoHLSUploader {
             }
 
             const data = await response.json();
+            console.log(data);
+            console.log(data.status);
+            console.log(data.data);
+            console.log(data.length);
 
             if (data.status === "ok" && data.data && data.data.length > 0) {
                 console.log(
