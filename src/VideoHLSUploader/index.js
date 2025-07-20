@@ -1258,10 +1258,6 @@ class VideoHLSUploader {
             }
 
             const data = await response.json();
-            console.log(data);
-            console.log(data.status);
-            console.log(data.data);
-            console.log(data.length);
 
             if (data.status === "ok" && data.data && data.data.length > 0) {
                 console.log(
