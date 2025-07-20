@@ -1382,6 +1382,89 @@ class VideoHLSUploader {
         }
     }
 
+    async downloadPodnapisiSubtitle(downloadUrl, outputPath, index) {
+        const maxRetries = 2;
+        let lastError;
+
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                const fullUrl = downloadUrl.startsWith("http")
+                    ? downloadUrl
+                    : `https://www.podnapisi.net${downloadUrl}`;
+
+                if (attempt > 0) {
+                    console.log(
+                        `🔄 Retry ${attempt} for subtitle ${index + 1}`
+                    );
+                    // Add a small delay between retries
+                    await new Promise((resolve) =>
+                        setTimeout(resolve, 1000 * attempt)
+                    );
+                }
+
+                console.log(`📥 Downloading subtitle ${index + 1}: ${fullUrl}`);
+
+                const response = await fetch(fullUrl, {
+                    headers: {
+                        "User-Agent":
+                            "Mozilla/5.0 (compatible; SubtitleDownloader/1.0)",
+                    },
+                    timeout: 30000, // 30 second timeout
+                });
+
+                if (!response.ok) {
+                    throw new Error(
+                        `Download failed: ${response.status} ${response.statusText}`
+                    );
+                }
+
+                const buffer = await response.arrayBuffer();
+                const uint8Array = new Uint8Array(buffer);
+
+                // Handle ZIP files (most Podnapisi downloads are zipped)
+                if (uint8Array[0] === 0x50 && uint8Array[1] === 0x4b) {
+                    const AdmZip = require("adm-zip");
+                    const zip = new AdmZip(Buffer.from(uint8Array));
+                    const entries = zip.getEntries();
+
+                    const srtEntry = entries.find(
+                        (entry) =>
+                            entry.entryName.toLowerCase().endsWith(".srt") ||
+                            entry.entryName.toLowerCase().endsWith(".sub")
+                    );
+
+                    if (srtEntry) {
+                        const srtContent = srtEntry.getData().toString("utf8");
+                        const vttContent = this.convertSrtToVtt(srtContent);
+                        fs.writeFileSync(outputPath, vttContent, "utf8");
+                        return true;
+                    } else {
+                        throw new Error("No SRT file found in ZIP archive");
+                    }
+                } else {
+                    // Direct SRT file
+                    const content = Buffer.from(uint8Array).toString("utf8");
+                    const vttContent = this.convertSrtToVtt(content);
+                    fs.writeFileSync(outputPath, vttContent, "utf8");
+                    return true;
+                }
+            } catch (error) {
+                lastError = error;
+                console.warn(
+                    `⚠️ Attempt ${attempt + 1} failed for subtitle ${
+                        index + 1
+                    }: ${error.message}`
+                );
+
+                if (attempt === maxRetries) {
+                    throw lastError;
+                }
+            }
+        }
+
+        return false;
+    }
+
     convertSrtToVtt(srtContent) {
         let vttContent = "WEBVTT\n\n";
 
