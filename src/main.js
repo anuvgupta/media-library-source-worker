@@ -38,6 +38,7 @@ const {
 } = require("@aws-sdk/client-cloudfront");
 
 const { VideoHLSUploader } = require("./VideoHLSUploader/index.js");
+const { utf8ToBase64, base64ToUtf8 } = require("./util.js");
 
 // Configuration
 const STAGE = process.env.STAGE;
@@ -51,14 +52,6 @@ const LIBRARY_PATH = process.env.LIBRARY_PATH
 
 // Token storage file
 const TOKEN_FILE = path.join(__dirname, "../.worker-tokens.json");
-
-// Utils
-const utf8ToBase64 = (utf8String) => {
-    return Buffer.from(utf8String, "utf8").toString("base64");
-};
-const base64ToUtf8 = (base64String) => {
-    return Buffer.from(base64String, "base64").toString("utf8");
-};
 
 // Media worker monolith class
 class MediaWorker {

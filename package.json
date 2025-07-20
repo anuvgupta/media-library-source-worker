@@ -32,6 +32,7 @@
         "@aws-sdk/client-sqs": "^3.835.0",
         "@aws-sdk/lib-storage": "^3.839.0",
         "@aws-sdk/s3-request-presigner": "^3.839.0",
+        "adm-zip": "^0.5.16",
         "aws4": "^1.13.2",
         "pm2": "^6.0.8"
     },

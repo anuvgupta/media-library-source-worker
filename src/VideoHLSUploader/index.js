@@ -6,6 +6,8 @@ const { spawn } = require("child_process");
 const { Upload } = require("@aws-sdk/lib-storage");
 const { ListObjectsV2Command } = require("@aws-sdk/client-s3");
 
+const { utf8ToBase64, base64ToUtf8 } = require("../util.js");
+
 // const AUDIO_REENCODE_BITRATE = "128k";
 const AUDIO_REENCODE_BITRATE = "256k";
 
@@ -799,14 +801,37 @@ class VideoHLSUploader {
                     );
                     console.log(`📝 Segment info saved to: segment-info.json`);
 
+                    // Replace the existing subtitle extraction block with:
                     if (videoInfo.hasSubtitles) {
                         console.log(
                             `🔤 Extracting ${videoInfo.subtitles.length} subtitle tracks...`
                         );
-                        await this.extractSubtitles(
+                        const extractedSubtitles = await this.extractSubtitles(
                             filePath,
                             movieId,
                             videoInfo.subtitles,
+                            outputDir
+                        );
+
+                        // Check if we successfully extracted any English subtitles
+                        const hasEnglishSubtitles =
+                            extractedSubtitles && extractedSubtitles.length > 0;
+
+                        if (!hasEnglishSubtitles) {
+                            console.log(
+                                `🔍 No English subtitles found in video, searching Podnapisi...`
+                            );
+                            await this.searchAndDownloadPodnapisiSubtitles(
+                                movieId,
+                                outputDir
+                            );
+                        }
+                    } else {
+                        console.log(
+                            `🔍 No embedded subtitles found, searching Podnapisi...`
+                        );
+                        await this.searchAndDownloadPodnapisiSubtitles(
+                            movieId,
                             outputDir
                         );
                     }
@@ -1201,6 +1226,204 @@ class VideoHLSUploader {
 
         const results = await Promise.all(subtitlePromises);
         return results.filter((result) => result !== null);
+    }
+
+    async searchPodnapisiSubtitles(movieTitle, year) {
+        try {
+            const cleanTitle = movieTitle.replace(/[^\w\s-]/g, "").trim();
+            const searchQuery = year ? `${cleanTitle} ${year}` : cleanTitle;
+
+            const url = `https://www.podnapisi.net/en/subtitles/search/?keywords=${encodeURIComponent(
+                searchQuery
+            )}&language=en&sort=ratings.combined&order=desc`;
+
+            console.log(`🔍 Searching Podnapisi for: ${searchQuery}`);
+
+            const response = await fetch(url, {
+                headers: {
+                    Accept: "application/json",
+                    "User-Agent":
+                        "Mozilla/5.0 (compatible; SubtitleDownloader/1.0)",
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error(`Podnapisi search failed: ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            if (data.status === "ok" && data.data && data.data.length > 0) {
+                console.log(
+                    `📋 Found ${data.data.length} subtitles on Podnapisi`
+                );
+                return data.data.slice(0, 5); // Return top 5
+            }
+
+            return [];
+        } catch (error) {
+            console.warn(`⚠️ Podnapisi search failed: ${error.message}`);
+            return [];
+        }
+    }
+
+    async downloadPodnapisiSubtitle(downloadUrl, outputPath, index) {
+        try {
+            const fullUrl = downloadUrl.startsWith("http")
+                ? downloadUrl
+                : `https://www.podnapisi.net${downloadUrl}`;
+
+            console.log(`📥 Downloading subtitle ${index + 1}: ${fullUrl}`);
+
+            const response = await fetch(fullUrl, {
+                headers: {
+                    "User-Agent":
+                        "Mozilla/5.0 (compatible; SubtitleDownloader/1.0)",
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error(`Download failed: ${response.status}`);
+            }
+
+            const buffer = await response.arrayBuffer();
+            const uint8Array = new Uint8Array(buffer);
+
+            // Handle ZIP files (most Podnapisi downloads are zipped)
+            if (uint8Array[0] === 0x50 && uint8Array[1] === 0x4b) {
+                const AdmZip = require("adm-zip");
+                const zip = new AdmZip(Buffer.from(uint8Array));
+                const entries = zip.getEntries();
+
+                const srtEntry = entries.find(
+                    (entry) =>
+                        entry.entryName.toLowerCase().endsWith(".srt") ||
+                        entry.entryName.toLowerCase().endsWith(".sub")
+                );
+
+                if (srtEntry) {
+                    const srtContent = srtEntry.getData().toString("utf8");
+                    const vttContent = this.convertSrtToVtt(srtContent);
+                    fs.writeFileSync(outputPath, vttContent, "utf8");
+                    return true;
+                }
+            } else {
+                // Direct SRT file
+                const content = Buffer.from(uint8Array).toString("utf8");
+                const vttContent = this.convertSrtToVtt(content);
+                fs.writeFileSync(outputPath, vttContent, "utf8");
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            console.warn(`⚠️ Failed to download subtitle: ${error.message}`);
+            return false;
+        }
+    }
+
+    convertSrtToVtt(srtContent) {
+        let vttContent = "WEBVTT\n\n";
+
+        // Convert SRT timestamps to VTT format
+        const lines = srtContent.split("\n");
+        let inSubtitle = false;
+        let subtitleText = "";
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+
+            // Skip subtitle numbers
+            if (/^\d+$/.test(line)) {
+                continue;
+            }
+
+            // Time stamps
+            if (line.includes("-->")) {
+                const timeStamp = line.replace(/,/g, ".");
+                vttContent += timeStamp + "\n";
+                inSubtitle = true;
+                continue;
+            }
+
+            // Empty line - end of subtitle
+            if (line === "" && inSubtitle) {
+                vttContent += subtitleText + "\n\n";
+                subtitleText = "";
+                inSubtitle = false;
+                continue;
+            }
+
+            // Subtitle text
+            if (inSubtitle && line !== "") {
+                subtitleText += (subtitleText ? "\n" : "") + line;
+            }
+        }
+
+        // Add final subtitle if exists
+        if (inSubtitle && subtitleText) {
+            vttContent += subtitleText + "\n\n";
+        }
+
+        return vttContent;
+    }
+
+    async searchAndDownloadPodnapisiSubtitles(movieId, outputDir) {
+        try {
+            // Extract movie title and year from movieId (base64 encoded path)
+            const moviePath = base64ToUtf8(movieId);
+            const pathParts = moviePath.split("/");
+            const movieFolderName = pathParts[pathParts.length - 2]; // Get movie folder name
+            const titleMatch = movieFolderName.match(/^(.+?)\s*\((\d{4})\)$/);
+
+            const movieTitle = titleMatch
+                ? titleMatch[1].trim()
+                : movieFolderName;
+            const year = titleMatch ? titleMatch[2] : null;
+
+            const subtitles = await this.searchPodnapisiSubtitles(
+                movieTitle,
+                year
+            );
+
+            if (subtitles.length === 0) {
+                console.log(
+                    `ℹ️ No English subtitles found on Podnapisi for: ${movieTitle}`
+                );
+                return;
+            }
+
+            console.log(
+                `📥 Downloading ${subtitles.length} subtitles from Podnapisi...`
+            );
+
+            let downloadCount = 0;
+            for (let i = 0; i < subtitles.length; i++) {
+                const subtitle = subtitles[i];
+                const outputFilename = `subtitle_eng_podnapisi_${i}.vtt`;
+                const outputPath = path.join(outputDir, outputFilename);
+
+                const success = await this.downloadPodnapisiSubtitle(
+                    subtitle.download,
+                    outputPath,
+                    i
+                );
+                if (success) {
+                    downloadCount++;
+                    console.log(`✅ Downloaded: ${outputFilename}`);
+                }
+            }
+
+            if (downloadCount > 0) {
+                console.log(
+                    `🎉 Successfully downloaded ${downloadCount} subtitles from Podnapisi`
+                );
+            }
+        } catch (error) {
+            console.warn(
+                `⚠️ Podnapisi subtitle download failed: ${error.message}`
+            );
+        }
     }
 
     async uploadSegment(
