@@ -1,7 +1,9 @@
 // Utils
-export const utf8ToBase64 = (utf8String) => {
+const utf8ToBase64 = (utf8String) => {
     return Buffer.from(utf8String, "utf8").toString("base64");
 };
-export const base64ToUtf8 = (base64String) => {
+const base64ToUtf8 = (base64String) => {
     return Buffer.from(base64String, "base64").toString("utf8");
 };
+
+module.exports = { utf8ToBase64, base64ToUtf8 };
