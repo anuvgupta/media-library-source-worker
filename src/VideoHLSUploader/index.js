@@ -1235,7 +1235,7 @@ class VideoHLSUploader {
     async searchPodnapisiSubtitles(movieTitle, year) {
         try {
             const cleanTitle = movieTitle.replace(/[^\w\s-]/g, "").trim();
-            const searchQuery = year ? `${cleanTitle} ${year}` : cleanTitle;
+            const searchQuery = year ? `${cleanTitle} (${year})` : cleanTitle;
 
             const url = `https://www.podnapisi.net/en/subtitles/search/?keywords=${encodeURIComponent(
                 searchQuery
