@@ -22,5 +22,6 @@
     "moviePreSignedUrlExpiration": 7200,
     "concurrentUploads": 8,
     "prioritySegments": 8,
+    "maxConcurrentUploads": 5,
     "libraryPath": "/e/Library"
 }
