@@ -1,0 +1,1 @@
+Add search bar log to cloud functionality to frontend search bar (every 0.5 seconds check for changed search bar and call api, from api store in database)
