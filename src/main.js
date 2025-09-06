@@ -499,7 +499,6 @@ class MediaWorker {
         }
     }
 
-    // Handle upload-movie command
     async handleUploadMovie(messageBody) {
         console.log("🎬 Handling upload-movie command");
         const movieId = messageBody.movieId;
@@ -511,17 +510,21 @@ class MediaWorker {
         // Check if upload is already in progress
         if (this.activeUploads.has(movieId)) {
             console.log(
-                `🔄 Upload already in progress for movie: ${movieId}, discarding duplicate request`
+                `🔄 Upload already in progress for content: ${movieId}, discarding duplicate request`
             );
             return { status: "duplicate_request_discarded", movieId };
         }
 
         const libraryPath = LIBRARY_PATH; // Use from config/env
-        const moviePathInLibrary = base64ToUtf8(messageBody.movieId);
-        const moviePath = `${libraryPath}/${moviePathInLibrary}`;
+        const contentPathInLibrary = base64ToUtf8(messageBody.movieId);
+        const contentPath = path.join(libraryPath, contentPathInLibrary);
 
-        if (!fs.existsSync(moviePath)) {
-            throw new Error(`Movie file not found: ${moviePath}`);
+        // Determine content type from path
+        const contentType = this.determineContentType(contentPathInLibrary);
+        const contentName = this.extractContentName(contentPathInLibrary);
+
+        if (!fs.existsSync(contentPath)) {
+            throw new Error(`Content file not found: ${contentPath}`);
         }
 
         try {
@@ -529,23 +532,158 @@ class MediaWorker {
             this.activeUploads.set(movieId, {
                 status: "starting",
                 startTime: Date.now(),
-                moviePath: moviePath,
+                contentPath: contentPath,
+                contentType: contentType,
+                contentName: contentName,
             });
 
-            const uploadResult = await this.uploadMedia(moviePath, movieId);
-
             console.log(
-                `✅ Movie upload completed: ${
-                    movieId || path.basename(moviePath)
-                }`
+                `🚀 Starting upload for ${contentType}: ${contentName}`
             );
+            const uploadResult = await this.uploadMedia(contentPath, movieId);
+
+            console.log(`✅ ${contentType} upload completed: ${contentName}`);
             return uploadResult;
         } catch (error) {
-            console.error(`❌ Movie upload failed: ${movieId}`, error);
+            console.error(
+                `❌ ${contentType} upload failed: ${contentName}`,
+                error
+            );
             throw error;
         } finally {
             // Always clean up the active upload tracking
             this.activeUploads.delete(movieId);
+        }
+    }
+
+    // Helper method to determine content type from path
+    determineContentType(contentPath) {
+        const pathParts = contentPath.split(path.sep);
+        const firstDir = pathParts[0];
+
+        if (firstDir === CONFIG.libraryMoviePath) {
+            return "Movie";
+        } else if (firstDir === CONFIG.libraryTvPath) {
+            return "TV Episode";
+        } else {
+            // Fallback for legacy paths without media type prefix
+            if (
+                contentPath.includes("/Season ") ||
+                contentPath.includes("/S0")
+            ) {
+                return "TV Episode";
+            }
+            return "Movie";
+        }
+    }
+
+    // Helper method to extract content name from path for logging
+    extractContentName(contentPath) {
+        const pathParts = contentPath.split(path.sep);
+        const fileName = path.basename(contentPath);
+
+        // Remove file extension for cleaner logging
+        const nameWithoutExt = path.parse(fileName).name;
+
+        if (pathParts[0] === CONFIG.libraryTvPath) {
+            // For TV: try to extract show name and episode info
+            // Path format: TV/[Collection]/ShowName/Season X/EpisodeFile.ext
+            let showName = "Unknown Show";
+            let seasonInfo = "";
+
+            if (pathParts.length >= 4) {
+                // With collection: TV/Collection/ShowName/Season X/Episode
+                showName = this.parseContentName(pathParts[2]);
+                seasonInfo = ` (${pathParts[3]})`;
+            } else if (pathParts.length >= 3) {
+                // Direct: TV/ShowName/Season X/Episode
+                showName = this.parseContentName(pathParts[1]);
+                seasonInfo = ` (${pathParts[2]})`;
+            }
+
+            return `${showName}${seasonInfo} - ${nameWithoutExt}`;
+        } else {
+            // For movies: try to extract movie name
+            // Path format: Movies/[Collection]/MovieName/MovieFile.ext
+            let movieName = "Unknown Movie";
+
+            if (pathParts.length >= 3) {
+                if (pathParts[0] === CONFIG.libraryMoviePath) {
+                    if (pathParts.length >= 4) {
+                        // With collection: Movies/Collection/MovieName/MovieFile
+                        movieName = this.parseContentName(pathParts[2]);
+                    } else {
+                        // Direct: Movies/MovieName/MovieFile
+                        movieName = this.parseContentName(pathParts[1]);
+                    }
+                } else {
+                    // Legacy format: Collection/MovieName/MovieFile
+                    movieName = this.parseContentName(pathParts[1]);
+                }
+            }
+
+            return movieName;
+        }
+    }
+
+    // Updated async upload handler
+    async handleUploadMovieAsync(movieId, messageBody, message) {
+        try {
+            const uploadInfo = this.activeUploads.get(movieId);
+            const contentType = uploadInfo?.contentType || "Content";
+            const contentName = uploadInfo?.contentName || movieId;
+
+            // Update status: Processing started
+            await this.updateMovieUploadStatus(
+                movieId,
+                0,
+                "starting",
+                `${contentType} processing started`
+            );
+
+            const libraryPath = LIBRARY_PATH;
+            const contentPathInLibrary = base64ToUtf8(messageBody.movieId);
+            const contentPath = path.join(libraryPath, contentPathInLibrary);
+
+            if (!fs.existsSync(contentPath)) {
+                throw new Error(`Content file not found: ${contentPath}`);
+            }
+
+            const uploadResult = await this.uploadMedia(contentPath, movieId);
+
+            // Update status: Processing completed
+            await this.updateMovieUploadStatus(
+                movieId,
+                100,
+                "completed",
+                `${contentType} processing completed`
+            );
+
+            // Delete SQS message after successful upload
+            await this.deleteMessage(message.ReceiptHandle);
+            console.log(
+                `✅ Message deleted for completed upload: ${contentName}`
+            );
+
+            return uploadResult;
+        } catch (error) {
+            const uploadInfo = this.activeUploads.get(movieId);
+            const contentType = uploadInfo?.contentType || "Content";
+
+            // Update status: Processing failed
+            await this.updateMovieUploadStatus(
+                movieId,
+                0,
+                "failed",
+                `${contentType} processing failed: ${error.message}`
+            );
+
+            console.error(
+                `❌ Upload failed for ${contentType}: ${movieId}`,
+                error
+            );
+            // Don't delete message on failure - let it retry
+            throw error;
         }
     }
 
@@ -1918,55 +2056,6 @@ class MediaWorker {
                 error
             );
             this.finishUpload(movieId);
-        }
-    }
-
-    // New async upload handler
-    async handleUploadMovieAsync(movieId, messageBody, message) {
-        try {
-            // Update status: Processing started
-            await this.updateMovieUploadStatus(
-                movieId,
-                0,
-                "starting",
-                "Movie processing started"
-            );
-
-            const libraryPath = LIBRARY_PATH;
-            const moviePathInLibrary = base64ToUtf8(messageBody.movieId);
-            const moviePath = `${libraryPath}/${moviePathInLibrary}`;
-
-            if (!fs.existsSync(moviePath)) {
-                throw new Error(`Movie file not found: ${moviePath}`);
-            }
-
-            const uploadResult = await this.uploadMedia(moviePath, movieId);
-
-            // Update status: Processing completed
-            await this.updateMovieUploadStatus(
-                movieId,
-                100,
-                "completed",
-                "All processing completed"
-            );
-
-            // Delete SQS message after successful upload
-            await this.deleteMessage(message.ReceiptHandle);
-            console.log(`✅ Message deleted for completed upload: ${movieId}`);
-
-            return uploadResult;
-        } catch (error) {
-            // Update status: Processing failed
-            await this.updateMovieUploadStatus(
-                movieId,
-                0,
-                "failed",
-                `Processing failed: ${error.message}`
-            );
-
-            console.error(`❌ Upload failed for movie: ${movieId}`, error);
-            // Don't delete message on failure - let it retry
-            throw error;
         }
     }
 
