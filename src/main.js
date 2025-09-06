@@ -1194,25 +1194,7 @@ class MediaWorker {
         }
     }
 
-    // Parse movie name and year from folder name
-    parseMovieNameAndYear(folderName) {
-        // Match pattern: "Movie Name (YYYY)"
-        const match = folderName.match(/^(.+?)\s*\((\d{4})\)$/);
-        if (match) {
-            return {
-                name: match[1].trim(),
-                year: parseInt(match[2]),
-            };
-        }
-
-        // Fallback: return the folder name as-is and null year
-        return {
-            name: folderName,
-            year: null,
-        };
-    }
-
-    // Scan library for movie collections and metadata
+    // Scan library for movie collections and TV shows with new structure
     async scanLibrary(libraryPath) {
         console.log(`Scanning library at: ${libraryPath}`);
 
@@ -1230,177 +1212,496 @@ class MediaWorker {
             console.log("✅ ffprobe found - will extract detailed metadata");
         }
 
-        const collections = {};
+        const library = {
+            movies: {},
+            tv: {},
+        };
 
         try {
-            // Get all collection folders (first level subfolders)
-            const collectionFolders = fs
-                .readdirSync(libraryPath, { withFileTypes: true })
-                .filter((dirent) => dirent.isDirectory())
-                .map((dirent) => dirent.name);
-
-            console.log(`Found ${collectionFolders.length} collections`);
-
-            for (const collectionName of collectionFolders) {
-                // console.log(`\nScanning collection: ${collectionName}`);
-                const collectionPath = path.join(libraryPath, collectionName);
-                collections[collectionName] = [];
-
-                // Get all movie folders (second level subfolders)
-                const movieFolders = fs
-                    .readdirSync(collectionPath, { withFileTypes: true })
-                    .filter((dirent) => dirent.isDirectory())
-                    .map((dirent) => dirent.name);
-
-                // console.log(
-                //     `  Found ${movieFolders.length} movies in ${collectionName}`
-                // );
-
-                for (const movieFolderName of movieFolders) {
-                    const moviePath = path.join(
-                        collectionPath,
-                        movieFolderName
-                    );
-                    const { name, year } =
-                        this.parseMovieNameAndYear(movieFolderName);
-
-                    // console.log(
-                    //     `    Processing: ${name} (${year || "Unknown Year"})`
-                    // );
-
-                    try {
-                        // Find video files in the movie folder
-                        const files = fs
-                            .readdirSync(moviePath, { withFileTypes: true })
-                            .filter((dirent) => dirent.isFile())
-                            .map((dirent) => dirent.name);
-
-                        let videoFile = null;
-                        let videoFilePath = null;
-
-                        // Look for video files
-                        for (const fileName of files) {
-                            const filePath = path.join(moviePath, fileName);
-                            if (this.isVideoFile(filePath)) {
-                                videoFile = fileName;
-                                videoFilePath = filePath;
-                                break; // Use the first video file found
-                            }
-                        }
-
-                        if (!videoFile) {
-                            console.log(
-                                `      Warning: No video file found in ${movieFolderName}`
-                            );
-                            collections[collectionName].push({
-                                name,
-                                year,
-                                runtime: "Unknown",
-                                fileSize: "Unknown",
-                                quality: "Unknown",
-                                error: "No video file found",
-                            });
-                            continue;
-                        }
-
-                        // console.log(`      Found video file: ${videoFile}`);
-
-                        // Get file size
-                        const stats = fs.statSync(videoFilePath);
-                        const fileSize = this.formatFileSize(stats.size);
-
-                        // Initialize metadata
-                        let runtime = "Unknown";
-                        let quality = "Unknown";
-
-                        // Try to get metadata using ffprobe if available
-                        if (ffprobeAvailable) {
-                            try {
-                                const metadata = await this.getVideoMetadata(
-                                    videoFilePath
-                                );
-
-                                // Extract runtime
-                                if (
-                                    metadata.format &&
-                                    metadata.format.duration
-                                ) {
-                                    const durationSeconds = parseFloat(
-                                        metadata.format.duration
-                                    );
-                                    runtime =
-                                        this.formatRuntime(durationSeconds);
-                                    // console.log(`        Duration: ${runtime}`);
-                                }
-
-                                // Extract quality
-                                if (metadata.streams) {
-                                    quality = this.extractQuality(
-                                        metadata.streams
-                                    );
-                                    // console.log(`        Quality: ${quality}`);
-                                }
-                            } catch (metadataError) {
-                                console.log(
-                                    `        ffprobe failed: ${metadataError.message}`
-                                );
-                                // console.log(
-                                //     `        Falling back to filename-based quality detection`
-                                // );
-                                quality =
-                                    this.extractQualityFromFilename(videoFile);
-                            }
-                        } else {
-                            // Fallback to filename-based quality detection
-                            quality =
-                                this.extractQualityFromFilename(videoFile);
-                            // console.log(
-                            //     `        Quality (from filename): ${quality}`
-                            // );
-                        }
-
-                        // console.log(
-                        //     `      Final metadata: ${runtime}, ${quality}, ${fileSize}`
-                        // );
-
-                        // Add movie to collection
-                        collections[collectionName].push({
-                            name,
-                            year,
-                            runtime,
-                            fileSize,
-                            quality,
-                            videoFile,
-                        });
-                    } catch (movieError) {
-                        console.log(
-                            `      Error processing ${movieFolderName}: ${movieError.message}`
-                        );
-                        collections[collectionName].push({
-                            name,
-                            year,
-                            runtime: "Unknown",
-                            fileSize: "Unknown",
-                            quality: "Unknown",
-                            error: movieError.message,
-                        });
-                    }
-                }
+            // Scan movies
+            const moviesPath = path.join(libraryPath, CONFIG.libraryMoviePath);
+            if (fs.existsSync(moviesPath)) {
+                console.log(`Scanning movies at: ${moviesPath}`);
+                library.movies = await this.scanMovies(
+                    moviesPath,
+                    ffprobeAvailable
+                );
+            } else {
+                console.log(`Movies directory not found: ${moviesPath}`);
             }
 
-            console.log(
-                `\nLibrary scan complete. Found ${
-                    Object.keys(collections).length
-                } collections with ${Object.values(collections).reduce(
-                    (total, movies) => total + movies.length,
-                    0
-                )} movies total.`
+            // Scan TV shows
+            const tvPath = path.join(libraryPath, CONFIG.libraryTvPath);
+            if (fs.existsSync(tvPath)) {
+                console.log(`Scanning TV shows at: ${tvPath}`);
+                library.tv = await this.scanTvShows(tvPath, ffprobeAvailable);
+            } else {
+                console.log(`TV directory not found: ${tvPath}`);
+            }
+
+            const movieCount = Object.values(library.movies).reduce(
+                (total, movies) => total + movies.length,
+                0
             );
-            return collections;
+            const tvShowCount = Object.keys(library.tv).reduce(
+                (total, collection) => {
+                    return total + Object.keys(library.tv[collection]).length;
+                },
+                0
+            );
+
+            console.log(
+                `\nLibrary scan complete. Found ${movieCount} movies and ${tvShowCount} TV shows.`
+            );
+            return library;
         } catch (error) {
             console.error(`Error scanning library: ${error.message}`);
             throw error;
         }
+    }
+
+    // Scan movies directory
+    async scanMovies(moviesPath, ffprobeAvailable) {
+        const movies = {};
+        const entries = fs
+            .readdirSync(moviesPath, { withFileTypes: true })
+            .filter((dirent) => dirent.isDirectory())
+            .map((dirent) => dirent.name);
+
+        for (const entryName of entries) {
+            const entryPath = path.join(moviesPath, entryName);
+
+            // Check if this is a collection (contains subdirectories) or direct movie
+            const subEntries = fs.readdirSync(entryPath, {
+                withFileTypes: true,
+            });
+            const subdirectories = subEntries.filter((dirent) =>
+                dirent.isDirectory()
+            );
+            const videoFiles = subEntries.filter(
+                (dirent) =>
+                    dirent.isFile() &&
+                    this.isVideoFile(path.join(entryPath, dirent.name))
+            );
+
+            if (subdirectories.length > 0 && videoFiles.length === 0) {
+                // This is a collection directory
+                console.log(`Scanning movie collection: ${entryName}`);
+                movies[entryName] = [];
+
+                for (const movieDirName of subdirectories.map((d) => d.name)) {
+                    const moviePath = path.join(entryPath, movieDirName);
+                    const movie = await this.scanSingleMovie(
+                        movieDirName,
+                        moviePath,
+                        ffprobeAvailable,
+                        `${CONFIG.libraryMoviePath}/${entryName}/${movieDirName}`
+                    );
+                    if (movie) {
+                        movies[entryName].push(movie);
+                    }
+                }
+            } else if (videoFiles.length > 0) {
+                // This is a direct movie directory (no collection)
+                console.log(`Scanning direct movie: ${entryName}`);
+                if (!movies["Uncategorized"]) {
+                    movies["Uncategorized"] = [];
+                }
+
+                const movie = await this.scanSingleMovie(
+                    entryName,
+                    entryPath,
+                    ffprobeAvailable,
+                    `${CONFIG.libraryMoviePath}/${entryName}`
+                );
+                if (movie) {
+                    movies["Uncategorized"].push(movie);
+                }
+            }
+        }
+
+        return movies;
+    }
+
+    // Scan TV shows directory
+    async scanTvShows(tvPath, ffprobeAvailable) {
+        const tvShows = {};
+        const entries = fs
+            .readdirSync(tvPath, { withFileTypes: true })
+            .filter((dirent) => dirent.isDirectory())
+            .map((dirent) => dirent.name);
+
+        for (const entryName of entries) {
+            const entryPath = path.join(tvPath, entryName);
+
+            // Check if this is a collection or direct TV show
+            const subEntries = fs.readdirSync(entryPath, {
+                withFileTypes: true,
+            });
+            const subdirectories = subEntries.filter((dirent) =>
+                dirent.isDirectory()
+            );
+
+            // Check if any subdirectory looks like a season directory
+            const seasonDirs = subdirectories.filter(
+                (dir) =>
+                    /^season\s+\d+$/i.test(dir.name) || /^s\d+$/i.test(dir.name)
+            );
+
+            if (seasonDirs.length > 0) {
+                // This is a direct TV show directory (no collection)
+                console.log(`Scanning direct TV show: ${entryName}`);
+                if (!tvShows["Uncategorized"]) {
+                    tvShows["Uncategorized"] = {};
+                }
+
+                const showName = this.parseContentName(entryName);
+                const show = await this.scanSingleTvShow(
+                    showName,
+                    entryPath,
+                    ffprobeAvailable,
+                    `${CONFIG.libraryTvPath}/${entryName}`
+                );
+                if (show) {
+                    tvShows["Uncategorized"][showName] = show;
+                }
+            } else if (subdirectories.length > 0) {
+                // This is a collection directory
+                console.log(`Scanning TV collection: ${entryName}`);
+                tvShows[entryName] = {};
+
+                for (const showDirName of subdirectories.map((d) => d.name)) {
+                    const showPath = path.join(entryPath, showDirName);
+                    const showName = this.parseContentName(showDirName);
+                    const show = await this.scanSingleTvShow(
+                        showName,
+                        showPath,
+                        ffprobeAvailable,
+                        `${CONFIG.libraryTvPath}/${entryName}/${showDirName}`
+                    );
+                    if (show) {
+                        tvShows[entryName][showName] = show;
+                    }
+                }
+            }
+        }
+
+        return tvShows;
+    }
+
+    // Scan a single movie directory
+    async scanSingleMovie(
+        movieDirName,
+        moviePath,
+        ffprobeAvailable,
+        relativePath
+    ) {
+        try {
+            const movieName = this.parseContentName(movieDirName);
+            console.log(`    Processing movie: ${movieName}`);
+
+            // Find video files in the movie folder
+            const files = fs
+                .readdirSync(moviePath, { withFileTypes: true })
+                .filter((dirent) => dirent.isFile())
+                .map((dirent) => dirent.name);
+
+            let videoFile = null;
+            let videoFilePath = null;
+
+            // Look for video files
+            for (const fileName of files) {
+                const filePath = path.join(moviePath, fileName);
+                if (this.isVideoFile(filePath)) {
+                    videoFile = fileName;
+                    videoFilePath = filePath;
+                    break; // Use the first video file found
+                }
+            }
+
+            if (!videoFile) {
+                console.log(
+                    `      Warning: No video file found in ${movieDirName}`
+                );
+                return {
+                    name: movieName,
+                    runtime: "Unknown",
+                    fileSize: "Unknown",
+                    quality: "Unknown",
+                    error: "No video file found",
+                    path: relativePath,
+                };
+            }
+
+            console.log(`      Found video file: ${videoFile}`);
+
+            // Get file size
+            const stats = fs.statSync(videoFilePath);
+            const fileSize = this.formatFileSize(stats.size);
+
+            // Initialize metadata
+            let runtime = "Unknown";
+            let quality = "Unknown";
+
+            // Try to get metadata using ffprobe if available
+            if (ffprobeAvailable) {
+                try {
+                    const metadata = await this.getVideoMetadata(videoFilePath);
+
+                    // Extract runtime
+                    if (metadata.format && metadata.format.duration) {
+                        const durationSeconds = parseFloat(
+                            metadata.format.duration
+                        );
+                        runtime = this.formatRuntime(durationSeconds);
+                    }
+
+                    // Extract quality
+                    if (metadata.streams) {
+                        quality = this.extractQuality(metadata.streams);
+                    }
+                } catch (metadataError) {
+                    console.log(
+                        `        ffprobe failed: ${metadataError.message}`
+                    );
+                    quality = this.extractQualityFromFilename(videoFile);
+                }
+            } else {
+                quality = this.extractQualityFromFilename(videoFile);
+            }
+
+            return {
+                name: movieName,
+                runtime,
+                fileSize,
+                quality,
+                videoFile,
+                path: relativePath,
+            };
+        } catch (movieError) {
+            console.log(
+                `      Error processing ${movieDirName}: ${movieError.message}`
+            );
+            return {
+                name: this.parseContentName(movieDirName),
+                runtime: "Unknown",
+                fileSize: "Unknown",
+                quality: "Unknown",
+                error: movieError.message,
+                path: relativePath,
+            };
+        }
+    }
+
+    // Scan a single TV show directory
+    async scanSingleTvShow(showName, showPath, ffprobeAvailable, relativePath) {
+        try {
+            console.log(`    Processing TV show: ${showName}`);
+
+            const show = {
+                name: showName,
+                seasons: {},
+                path: relativePath,
+            };
+
+            // Find season directories
+            const entries = fs
+                .readdirSync(showPath, { withFileTypes: true })
+                .filter((dirent) => dirent.isDirectory())
+                .map((dirent) => dirent.name);
+
+            const seasonDirs = entries.filter(
+                (dirName) =>
+                    /^season\s+\d+$/i.test(dirName) || /^s\d+$/i.test(dirName)
+            );
+
+            if (seasonDirs.length === 0) {
+                console.log(
+                    `      Warning: No season directories found in ${showName}`
+                );
+                return show;
+            }
+
+            for (const seasonDirName of seasonDirs) {
+                const seasonNumber = this.parseSeasonNumber(seasonDirName);
+                if (seasonNumber === null) continue;
+
+                console.log(`      Processing Season ${seasonNumber}`);
+                const seasonPath = path.join(showPath, seasonDirName);
+
+                show.seasons[seasonNumber] = await this.scanSeason(
+                    seasonPath,
+                    seasonNumber,
+                    ffprobeAvailable,
+                    `${relativePath}/${seasonDirName}`
+                );
+            }
+
+            return show;
+        } catch (showError) {
+            console.log(
+                `      Error processing TV show ${showName}: ${showError.message}`
+            );
+            return {
+                name: showName,
+                seasons: {},
+                error: showError.message,
+                path: relativePath,
+            };
+        }
+    }
+
+    // Scan a single season directory
+    async scanSeason(seasonPath, seasonNumber, ffprobeAvailable, relativePath) {
+        const episodes = [];
+
+        try {
+            const files = fs
+                .readdirSync(seasonPath, { withFileTypes: true })
+                .filter((dirent) => dirent.isFile())
+                .map((dirent) => dirent.name);
+
+            const videoFiles = files.filter((fileName) =>
+                this.isVideoFile(path.join(seasonPath, fileName))
+            );
+
+            for (const videoFile of videoFiles) {
+                const videoFilePath = path.join(seasonPath, videoFile);
+                const episodeInfo = this.parseEpisodeInfo(videoFile);
+
+                // Get file size
+                const stats = fs.statSync(videoFilePath);
+                const fileSize = this.formatFileSize(stats.size);
+
+                // Initialize metadata
+                let runtime = "Unknown";
+                let quality = "Unknown";
+
+                // Try to get metadata using ffprobe if available
+                if (ffprobeAvailable) {
+                    try {
+                        const metadata = await this.getVideoMetadata(
+                            videoFilePath
+                        );
+
+                        // Extract runtime
+                        if (metadata.format && metadata.format.duration) {
+                            const durationSeconds = parseFloat(
+                                metadata.format.duration
+                            );
+                            runtime = this.formatRuntime(durationSeconds);
+                        }
+
+                        // Extract quality
+                        if (metadata.streams) {
+                            quality = this.extractQuality(metadata.streams);
+                        }
+                    } catch (metadataError) {
+                        console.log(
+                            `        ffprobe failed for episode: ${metadataError.message}`
+                        );
+                        quality = this.extractQualityFromFilename(videoFile);
+                    }
+                } else {
+                    quality = this.extractQualityFromFilename(videoFile);
+                }
+
+                episodes.push({
+                    episodeFile: videoFile,
+                    season: seasonNumber,
+                    episode: episodeInfo.episode,
+                    episodeTitle: episodeInfo.title,
+                    runtime,
+                    fileSize,
+                    quality,
+                    path: `${relativePath}/${videoFile}`,
+                });
+            }
+
+            // Sort episodes by episode number
+            episodes.sort((a, b) => a.episode - b.episode);
+
+            console.log(
+                `        Found ${episodes.length} episodes in Season ${seasonNumber}`
+            );
+            return episodes;
+        } catch (error) {
+            console.log(
+                `        Error scanning season ${seasonNumber}: ${error.message}`
+            );
+            return episodes;
+        }
+    }
+
+    // Parse content name (remove year if present, but don't rely on it)
+    parseContentName(folderName) {
+        // Try to remove year in parentheses if present, but don't require it
+        // Handles cases like "Movie Name (2009)" or "Movie Name (2009) [1080p.x265]"
+        const match = folderName.match(/^(.+?)\s*\(\d{4}\)/);
+        if (match) {
+            return match[1].trim();
+        }
+        return folderName.trim();
+    }
+
+    // Parse season number from directory name
+    parseSeasonNumber(seasonDirName) {
+        // Match "Season 1", "Season 01", "S1", "S01", etc.
+        const match = seasonDirName.match(/^(?:season\s+)?s?(\d+)$/i);
+        if (match) {
+            return parseInt(match[1], 10);
+        }
+        return null;
+    }
+
+    // Parse episode information from filename
+    parseEpisodeInfo(fileName) {
+        // Remove file extension
+        const nameWithoutExt = path.parse(fileName).name;
+
+        // Try various episode naming patterns
+        // S01E01, S1E1, 1x01, etc.
+        const patterns = [
+            /s(\d+)e(\d+)(?:\s*[-–]\s*(.+?))?$/i, // S01E01 - Episode Title or S01E01 – Episode Title
+            /s(\d+)e(\d+)\s+(.+?)$/i, // S01E01 Episode Title (space separator)
+            /(\d+)x(\d+)(?:\s*[-–]\s*(.+?))?$/i, // 1x01 - Episode Title
+            /(\d+)x(\d+)\s+(.+?)$/i, // 1x01 Episode Title (space separator)
+            /episode\s*(\d+)(?:\s*[-–]\s*(.+?))?$/i, // Episode 01 - Title
+            /episode\s*(\d+)\s+(.+?)$/i, // Episode 01 Title (space separator)
+            /ep\.?\s*(\d+)(?:\s*[-–]\s*(.+?))?$/i, // Ep 01 - Title
+            /ep\.?\s*(\d+)\s+(.+?)$/i, // Ep 01 Title (space separator)
+            /^(\d+)(?:\s*[-–]\s*(.+?))?$/, // 01 - Title
+            /^(\d+)\s+(.+?)$/, // 01 Title (space separator)
+        ];
+
+        for (const pattern of patterns) {
+            const match = nameWithoutExt.match(pattern);
+            if (match) {
+                if (match.length === 4) {
+                    // Pattern with season and episode
+                    return {
+                        episode: parseInt(match[2], 10),
+                        title: match[3]
+                            ? match[3].trim()
+                            : `Episode ${match[2]}`,
+                    };
+                } else if (match.length === 3) {
+                    // Pattern with just episode
+                    return {
+                        episode: parseInt(match[1], 10),
+                        title: match[2]
+                            ? match[2].trim()
+                            : `Episode ${match[1]}`,
+                    };
+                }
+            }
+        }
+
+        // Fallback: just use filename
+        return {
+            episode: 1,
+            title: nameWithoutExt,
+        };
     }
 
     // Main authentication flow
@@ -1818,40 +2119,79 @@ class MediaWorker {
             );
             console.log(`📋 Found ${existingPosters.size} existing posters`);
 
-            // Flatten all movies and filter out those that already have posters
-            const allMovies = [];
-            Object.keys(libraryData).forEach((collection) => {
-                libraryData[collection].forEach((movie) => {
-                    const movieId = utf8ToBase64(
-                        `${collection}/${movie.name} (${movie.year})/${movie.videoFile}`
-                    );
-                    if (!existingPosters.has(movieId)) {
-                        allMovies.push({
-                            ...movie,
-                            collection,
-                            movieId,
-                        });
-                    }
+            // Flatten all movies and TV shows and filter out those that already have posters
+            const allContent = [];
+
+            // Process movies
+            if (libraryData.movies) {
+                Object.keys(libraryData.movies).forEach((collection) => {
+                    libraryData.movies[collection].forEach((movie) => {
+                        const movieId = utf8ToBase64(
+                            `${movie.path}/${movie.videoFile}`
+                        );
+                        if (!existingPosters.has(movieId)) {
+                            allContent.push({
+                                ...movie,
+                                collection,
+                                movieId,
+                                contentType: "movie",
+                            });
+                        }
+                    });
                 });
-            });
+            }
+
+            // Process TV shows - generate posters for shows, not individual episodes
+            if (libraryData.tv) {
+                Object.keys(libraryData.tv).forEach((collection) => {
+                    Object.keys(libraryData.tv[collection]).forEach(
+                        (showName) => {
+                            const show = libraryData.tv[collection][showName];
+                            // Use the first episode of the first season to generate show poster
+                            const firstSeason = Object.keys(show.seasons).sort(
+                                (a, b) => parseInt(a) - parseInt(b)
+                            )[0];
+                            if (
+                                firstSeason &&
+                                show.seasons[firstSeason].length > 0
+                            ) {
+                                const firstEpisode =
+                                    show.seasons[firstSeason][0];
+                                const showId = utf8ToBase64(
+                                    `${show.path}/${firstEpisode.episodeFile}`
+                                );
+                                if (!existingPosters.has(showId)) {
+                                    allContent.push({
+                                        name: show.name,
+                                        collection,
+                                        movieId: showId, // Keep same property name for compatibility
+                                        contentType: "tv",
+                                        videoFile: firstEpisode.episodeFile,
+                                    });
+                                }
+                            }
+                        }
+                    );
+                });
+            }
 
             console.log(
-                `🎬 Processing posters for ${allMovies.length} movies (${existingPosters.size} already cached)`
+                `🎬 Processing posters for ${allContent.length} items (${existingPosters.size} already cached)`
             );
 
-            if (allMovies.length === 0) {
-                console.log("✅ All movie posters already cached");
+            if (allContent.length === 0) {
+                console.log("✅ All content posters already cached");
                 return;
             }
 
-            // Process movies in batches
+            // Process content in batches
             const batchSize = this.posterProcessingConcurrency;
-            for (let i = 0; i < allMovies.length; i += batchSize) {
-                const batch = allMovies.slice(i, i + batchSize);
+            for (let i = 0; i < allContent.length; i += batchSize) {
+                const batch = allContent.slice(i, i + batchSize);
 
                 const batchResults = await Promise.allSettled(
-                    batch.map((movie) =>
-                        this.processMoviePosterWithTracking(movie)
+                    batch.map((content) =>
+                        this.processContentPosterWithTracking(content)
                     )
                 );
 
@@ -1863,7 +2203,7 @@ class MediaWorker {
                 });
 
                 // Delay between batches
-                if (i + batchSize < allMovies.length) {
+                if (i + batchSize < allContent.length) {
                     await new Promise((resolve) =>
                         setTimeout(resolve, this.tmdbApiDelay)
                     );

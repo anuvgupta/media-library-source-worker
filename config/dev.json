@@ -23,5 +23,7 @@
     "concurrentUploads": 8,
     "prioritySegments": 8,
     "maxConcurrentUploads": 5,
-    "libraryPath": "/e/Library"
+    "libraryPath": "/e/Library",
+    "libraryMoviePath": "Movies",
+    "libraryTvPath": "TV"
 }
