@@ -1198,6 +1198,9 @@ class MediaWorker {
         const fileName = path.basename(filePath);
         const ext = path.extname(filePath).toLowerCase();
 
+        console.log(`        Checking isVideoFile for: ${fileName}`);
+        console.log(`        Extension: ${ext}`);
+
         // Skip macOS metadata files and other system files
         if (
             fileName.startsWith("._") ||
@@ -1205,6 +1208,7 @@ class MediaWorker {
             fileName.startsWith("Thumbs.db") ||
             fileName.startsWith(".")
         ) {
+            console.log(`        Skipped: System file`);
             return false;
         }
 
@@ -1218,7 +1222,15 @@ class MediaWorker {
             ".flv",
             ".webm",
         ];
-        return videoExtensions.includes(ext);
+
+        const isVideo = videoExtensions.includes(ext);
+        console.log(
+            `        Is video: ${isVideo} (supported extensions: ${videoExtensions.join(
+                ", "
+            )})`
+        );
+
+        return isVideo;
     }
 
     // Check if ffprobe is available
@@ -1588,6 +1600,22 @@ class MediaWorker {
         try {
             const movieName = this.parseContentName(movieDirName);
             console.log(`    Processing movie: ${movieName}`);
+            console.log(`    Movie path: ${moviePath}`);
+
+            // Check if the directory exists
+            if (!fs.existsSync(moviePath)) {
+                console.log(
+                    `      Error: Directory does not exist: ${moviePath}`
+                );
+                return {
+                    name: movieName,
+                    runtime: "Unknown",
+                    fileSize: "Unknown",
+                    quality: "Unknown",
+                    error: "Directory not found",
+                    path: relativePath,
+                };
+            }
 
             // Find video files in the movie folder
             const files = fs
@@ -1595,16 +1623,25 @@ class MediaWorker {
                 .filter((dirent) => dirent.isFile())
                 .map((dirent) => dirent.name);
 
+            console.log(
+                `      Found ${files.length} files: ${files.join(", ")}`
+            );
+
             let videoFile = null;
             let videoFilePath = null;
 
-            // Look for video files
+            // Look for video files with detailed logging
             for (const fileName of files) {
                 const filePath = path.join(moviePath, fileName);
+                console.log(`      Checking file: ${fileName}`);
+
                 if (this.isVideoFile(filePath)) {
+                    console.log(`      ✅ Video file found: ${fileName}`);
                     videoFile = fileName;
                     videoFilePath = filePath;
                     break; // Use the first video file found
+                } else {
+                    console.log(`      ❌ Not a video file: ${fileName}`);
                 }
             }
 
@@ -1612,6 +1649,7 @@ class MediaWorker {
                 console.log(
                     `      Warning: No video file found in ${movieDirName}`
                 );
+                console.log(`      Files checked: ${files.join(", ")}`);
                 return {
                     name: movieName,
                     runtime: "Unknown",
