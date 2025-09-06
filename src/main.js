@@ -226,7 +226,7 @@ class MediaWorker {
         }
     }
 
-    // Handle refresh-library command
+    // Updated handleRefreshLibrary method
     async handleRefreshLibrary(messageBody) {
         console.log("🔄 Handling refresh-library command");
 
@@ -270,18 +270,62 @@ class MediaWorker {
                 `✅ Library data uploaded successfully to: ${uploadResult.Location}`
             );
 
-            // Log some stats about what was uploaded
-            const movieCount = Object.values(libraryData).reduce(
-                (total, movies) => total + movies.length,
-                0
-            );
-            const collectionCount = Object.keys(libraryData).length;
+            // Calculate stats for the new data structure
+            const movieCount = libraryData.movies
+                ? Object.values(libraryData.movies).reduce(
+                      (total, movies) => total + movies.length,
+                      0
+                  )
+                : 0;
+
+            const tvShowCount = libraryData.tv
+                ? Object.keys(libraryData.tv).reduce((total, collection) => {
+                      return (
+                          total + Object.keys(libraryData.tv[collection]).length
+                      );
+                  }, 0)
+                : 0;
+
+            const episodeCount = libraryData.tv
+                ? Object.keys(libraryData.tv).reduce((total, collection) => {
+                      return (
+                          total +
+                          Object.values(libraryData.tv[collection]).reduce(
+                              (showTotal, show) => {
+                                  return (
+                                      showTotal +
+                                      Object.values(show.seasons).reduce(
+                                          (seasonTotal, episodes) =>
+                                              seasonTotal + episodes.length,
+                                          0
+                                      )
+                                  );
+                              },
+                              0
+                          )
+                      );
+                  }, 0)
+                : 0;
+
+            const movieCollectionCount = libraryData.movies
+                ? Object.keys(libraryData.movies).length
+                : 0;
+            const tvCollectionCount = libraryData.tv
+                ? Object.keys(libraryData.tv).length
+                : 0;
+            const totalCollections = movieCollectionCount + tvCollectionCount;
+
             console.log(
-                `📊 Uploaded library contains ${movieCount} movies across ${collectionCount} collections`
+                `📊 Uploaded library contains ${movieCount} movies, ${tvShowCount} TV shows (${episodeCount} episodes) across ${totalCollections} collections`
             );
 
             // Create or update DynamoDB record via API
-            await this.updateLibraryAccessViaAPI(movieCount, collectionCount);
+            await this.updateLibraryAccessViaAPI(
+                movieCount,
+                totalCollections,
+                tvShowCount,
+                episodeCount
+            );
         } catch (s3Error) {
             console.error(
                 `❌ Failed to upload library data to S3:`,
@@ -306,8 +350,13 @@ class MediaWorker {
         return libraryData;
     }
 
-    // Method to update library access via API
-    async updateLibraryAccessViaAPI(movieCount, collectionCount) {
+    // Updated updateLibraryAccessViaAPI method signature
+    async updateLibraryAccessViaAPI(
+        movieCount,
+        collectionCount,
+        tvShowCount = 0,
+        episodeCount = 0
+    ) {
         if (!this.credentials?.identityId) {
             throw new Error("Authentication credentials not available");
         }
@@ -318,10 +367,12 @@ class MediaWorker {
             const ownerIdentityId = this.getIdentityId();
             const currentTime = new Date().toISOString();
 
-            // Prepare the request body
+            // Prepare the request body with new fields
             const requestBody = {
                 movieCount: movieCount,
                 collectionCount: collectionCount,
+                tvShowCount: tvShowCount,
+                episodeCount: episodeCount,
                 lastScanAt: currentTime,
             };
 
@@ -340,7 +391,7 @@ class MediaWorker {
                     `✅ LibraryAccess record updated successfully via API`
                 );
                 console.log(
-                    `📊 Record contains ${movieCount} movies across ${collectionCount} collections`
+                    `📊 Record contains ${movieCount} movies, ${tvShowCount} TV shows (${episodeCount} episodes) across ${collectionCount} collections`
                 );
             } else {
                 const errorText = await response.text();
@@ -2227,16 +2278,17 @@ class MediaWorker {
         }
     }
 
-    async processMoviePosterWithTracking(movie) {
+    // Updated helper method (renamed from processMoviePosterWithTracking)
+    async processContentPosterWithTracking(content) {
         try {
-            await this.processMoviePoster(movie);
+            await this.processContentPoster(content);
 
             // Return the cache path for invalidation
             const ownerIdentityId = this.getIdentityId();
-            return `/${CONFIG.posterUploadPath}/${ownerIdentityId}/poster_${movie.movieId}.jpg`;
+            return `/${CONFIG.posterUploadPath}/${ownerIdentityId}/poster_${content.movieId}.jpg`;
         } catch (error) {
             console.warn(
-                `⚠️ Failed to process poster for ${movie.name}:`,
+                `⚠️ Failed to process poster for ${content.name}:`,
                 error.message
             );
             return null;
@@ -2276,25 +2328,29 @@ class MediaWorker {
         }
     }
 
-    async processMoviePoster(movie) {
+    // Updated helper method (renamed from processMoviePoster)
+    async processContentPoster(content) {
         try {
+            const contentType =
+                content.contentType === "tv" ? "TV show" : "movie";
             console.log(
-                `🎬 Processing poster for: ${movie.name} (${movie.year})`
+                `🎬 Processing poster for ${contentType}: ${content.name}`
             );
 
             // Clean title for search (use the same logic as frontend)
-            const cleanedTitle = this.cleanMovieTitleForSearch(movie.name);
+            const cleanedTitle = this.cleanMovieTitleForSearch(content.name);
 
             // Search TMDB via API Gateway
             const queryParams = new URLSearchParams();
             queryParams.append("query", cleanedTitle);
-            if (movie.year) {
-                queryParams.append("year", movie.year);
-            }
+
+            // For TV shows, use different endpoint or add type parameter
+            const endpoint =
+                content.contentType === "tv" ? "metadata/tv" : "metadata";
 
             const response = await this.makeAuthenticatedAPIRequest(
                 "GET",
-                `metadata?${queryParams.toString()}`
+                `${endpoint}?${queryParams.toString()}`
             );
 
             if (!response.ok) {
@@ -2302,35 +2358,35 @@ class MediaWorker {
                 console.warn(
                     `Failed to get metadata: ${response.status} ${errorText}`
                 );
+                return;
             }
 
             const resultJson = await response.json();
-            // console.log(`   TMDB API response for ${movie.name}:`, resultJson);
             if (
                 !resultJson ||
                 !resultJson.results ||
                 resultJson.results.length === 0
             ) {
-                console.log(`   No TMDB results for: ${movie.name}`);
+                console.log(`   No TMDB results for: ${content.name}`);
                 return;
             }
 
-            const movieData = resultJson.results[0];
-            if (!movieData.poster_path) {
-                console.log(`   No poster available for: ${movie.name}`);
+            const contentData = resultJson.results[0];
+            if (!contentData.poster_path) {
+                console.log(`   No poster available for: ${content.name}`);
                 return;
             }
 
             // Download and upload poster
             await this.downloadAndUploadPoster(
-                movie.movieId,
-                movieData.poster_path
+                content.movieId,
+                contentData.poster_path
             );
 
-            console.log(`✅ Poster processed for: ${movie.name}`);
+            console.log(`✅ Poster processed for: ${content.name}`);
         } catch (error) {
             console.warn(
-                `⚠️ Failed to process poster for ${movie.name}:`,
+                `⚠️ Failed to process poster for ${content.name}:`,
                 error.message
             );
         }
