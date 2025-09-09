@@ -1544,9 +1544,8 @@ class MediaWorker {
             );
 
             // Check if any subdirectory looks like a season directory
-            const seasonDirs = subdirectories.filter(
-                (dir) =>
-                    /^season\s+\d+$/i.test(dir.name) || /^s\d+$/i.test(dir.name)
+            const seasonDirs = subdirectories.filter((dir) =>
+                this.isSeasonDirectory(dir.name)
             );
 
             if (seasonDirs.length > 0) {
@@ -1588,6 +1587,43 @@ class MediaWorker {
         }
 
         return tvShows;
+    }
+
+    // New helper method to identify season directories
+    isSeasonDirectory(dirName) {
+        // Match traditional patterns: "Season 1", "Season 01", "S1", "S01"
+        if (/^(?:season\s+)?s?\d+$/i.test(dirName)) {
+            return true;
+        }
+
+        // Match just numbers: "1", "01", "2", etc. (but exclude obvious non-season folders)
+        if (/^\d{1,2}$/.test(dirName)) {
+            const num = parseInt(dirName, 10);
+            // Reasonable season number range (1-50)
+            return num >= 1 && num <= 50;
+        }
+
+        return false;
+    }
+
+    // Updated parseSeasonNumber method to handle number-only directories
+    parseSeasonNumber(seasonDirName) {
+        // Match "Season 1", "Season 01", "S1", "S01", etc.
+        const match = seasonDirName.match(/^(?:season\s+)?s?(\d+)$/i);
+        if (match) {
+            return parseInt(match[1], 10);
+        }
+
+        // Match just numbers: "1", "01", "2", etc.
+        if (/^\d{1,2}$/.test(seasonDirName)) {
+            const num = parseInt(seasonDirName, 10);
+            // Reasonable season number range
+            if (num >= 1 && num <= 50) {
+                return num;
+            }
+        }
+
+        return null;
     }
 
     // Scan a single movie directory
@@ -1737,9 +1773,8 @@ class MediaWorker {
                 .filter((dirent) => dirent.isDirectory())
                 .map((dirent) => dirent.name);
 
-            const seasonDirs = entries.filter(
-                (dirName) =>
-                    /^season\s+\d+$/i.test(dirName) || /^s\d+$/i.test(dirName)
+            const seasonDirs = entries.filter((dirName) =>
+                this.isSeasonDirectory(dirName)
             );
 
             if (seasonDirs.length === 0) {
@@ -1783,66 +1818,70 @@ class MediaWorker {
         const episodes = [];
 
         try {
-            const files = fs
-                .readdirSync(seasonPath, { withFileTypes: true })
+            const entries = fs.readdirSync(seasonPath, { withFileTypes: true });
+            const files = entries
                 .filter((dirent) => dirent.isFile())
                 .map((dirent) => dirent.name);
+            const directories = entries
+                .filter((dirent) => dirent.isDirectory())
+                .map((dirent) => dirent.name);
 
-            const videoFiles = files.filter((fileName) =>
+            // Check for direct video files in season folder
+            const directVideoFiles = files.filter((fileName) =>
                 this.isVideoFile(path.join(seasonPath, fileName))
             );
 
-            for (const videoFile of videoFiles) {
-                const videoFilePath = path.join(seasonPath, videoFile);
-                const episodeInfo = this.parseEpisodeInfo(videoFile);
-
-                // Get file size
-                const stats = fs.statSync(videoFilePath);
-                const fileSize = this.formatFileSize(stats.size);
-
-                // Initialize metadata
-                let runtime = "Unknown";
-                let quality = "Unknown";
-
-                // Try to get metadata using ffprobe if available
-                if (ffprobeAvailable) {
-                    try {
-                        const metadata = await this.getVideoMetadata(
-                            videoFilePath
-                        );
-
-                        // Extract runtime
-                        if (metadata.format && metadata.format.duration) {
-                            const durationSeconds = parseFloat(
-                                metadata.format.duration
-                            );
-                            runtime = this.formatRuntime(durationSeconds);
-                        }
-
-                        // Extract quality
-                        if (metadata.streams) {
-                            quality = this.extractQuality(metadata.streams);
-                        }
-                    } catch (metadataError) {
-                        console.log(
-                            `        ffprobe failed for episode: ${metadataError.message}`
-                        );
-                        quality = this.extractQualityFromFilename(videoFile);
+            if (directVideoFiles.length > 0) {
+                // Handle direct video files (existing structure)
+                console.log(
+                    `        Found ${directVideoFiles.length} direct video files`
+                );
+                for (const videoFile of directVideoFiles) {
+                    const episode = await this.processEpisodeFile(
+                        seasonPath,
+                        videoFile,
+                        seasonNumber,
+                        ffprobeAvailable,
+                        `${relativePath}/${videoFile}`
+                    );
+                    if (episode) {
+                        episodes.push(episode);
                     }
-                } else {
-                    quality = this.extractQualityFromFilename(videoFile);
                 }
+            }
 
-                episodes.push({
-                    episodeFile: videoFile,
-                    season: seasonNumber,
-                    episode: episodeInfo.episode,
-                    episodeTitle: episodeInfo.title,
-                    runtime,
-                    fileSize,
-                    quality,
-                    path: `${relativePath}/${videoFile}`,
-                });
+            // Check for episode folders
+            if (directories.length > 0) {
+                console.log(
+                    `        Found ${directories.length} potential episode folders`
+                );
+                for (const episodeDirName of directories) {
+                    const episodePath = path.join(seasonPath, episodeDirName);
+                    const episodeFiles = fs
+                        .readdirSync(episodePath, { withFileTypes: true })
+                        .filter((dirent) => dirent.isFile())
+                        .map((dirent) => dirent.name);
+
+                    const videoFiles = episodeFiles.filter((fileName) =>
+                        this.isVideoFile(path.join(episodePath, fileName))
+                    );
+
+                    if (videoFiles.length > 0) {
+                        // Use the first video file found in the episode folder
+                        const videoFile = videoFiles[0];
+                        const episode = await this.processEpisodeFile(
+                            episodePath,
+                            videoFile,
+                            seasonNumber,
+                            ffprobeAvailable,
+                            `${relativePath}/${episodeDirName}/${videoFile}`,
+                            episodeDirName // Pass episode folder name for additional parsing
+                        );
+                        if (episode) {
+                            episodes.push(episode);
+                        }
+                    }
+                }
             }
 
             // Sort episodes by episode number
@@ -1857,6 +1896,90 @@ class MediaWorker {
                 `        Error scanning season ${seasonNumber}: ${error.message}`
             );
             return episodes;
+        }
+    }
+
+    // New helper method to process individual episode files
+    async processEpisodeFile(
+        episodePath,
+        videoFile,
+        seasonNumber,
+        ffprobeAvailable,
+        relativePath,
+        episodeFolderName = null
+    ) {
+        try {
+            const videoFilePath = path.join(episodePath, videoFile);
+
+            // Try to parse episode info from filename first, then folder name if available
+            let episodeInfo = this.parseEpisodeInfo(videoFile);
+
+            // If we have an episode folder name and couldn't get good info from filename, try folder name
+            if (
+                episodeFolderName &&
+                (!episodeInfo.episode || episodeInfo.episode === 1)
+            ) {
+                const folderEpisodeInfo =
+                    this.parseEpisodeInfo(episodeFolderName);
+                if (
+                    folderEpisodeInfo.episode > 1 ||
+                    folderEpisodeInfo.title !== episodeFolderName
+                ) {
+                    episodeInfo = folderEpisodeInfo;
+                }
+            }
+
+            // Get file size
+            const stats = fs.statSync(videoFilePath);
+            const fileSize = this.formatFileSize(stats.size);
+
+            // Initialize metadata
+            let runtime = "Unknown";
+            let quality = "Unknown";
+
+            // Try to get metadata using ffprobe if available
+            if (ffprobeAvailable) {
+                try {
+                    const metadata = await this.getVideoMetadata(videoFilePath);
+
+                    // Extract runtime
+                    if (metadata.format && metadata.format.duration) {
+                        const durationSeconds = parseFloat(
+                            metadata.format.duration
+                        );
+                        runtime = this.formatRuntime(durationSeconds);
+                    }
+
+                    // Extract quality
+                    if (metadata.streams) {
+                        quality = this.extractQuality(metadata.streams);
+                    }
+                } catch (metadataError) {
+                    console.log(
+                        `        ffprobe failed for episode: ${metadataError.message}`
+                    );
+                    quality = this.extractQualityFromFilename(videoFile);
+                }
+            } else {
+                quality = this.extractQualityFromFilename(videoFile);
+            }
+
+            return {
+                episodeFile: videoFile,
+                season: seasonNumber,
+                episode: episodeInfo.episode,
+                episodeTitle: episodeInfo.title,
+                runtime,
+                fileSize,
+                quality,
+                path: relativePath,
+                episodeFolder: episodeFolderName, // Track if this episode was in a folder
+            };
+        } catch (error) {
+            console.log(
+                `        Error processing episode file ${videoFile}: ${error.message}`
+            );
+            return null;
         }
     }
 
