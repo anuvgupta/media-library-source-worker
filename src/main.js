@@ -2459,7 +2459,7 @@ class MediaWorker {
                                 const firstEpisode =
                                     show.seasons[firstSeason][0];
                                 const showId = utf8ToBase64(
-                                    `${show.path}/${firstEpisode.episodeFile}`
+                                    `${firstEpisode.path}`
                                 );
                                 if (!existingPosters.has(showId)) {
                                     allContent.push({
