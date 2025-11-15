@@ -1,9 +1,8 @@
 # media-library-source-worker
+
 Source provider for media library worker
 
-
 Run `b` and then `b setup-worker` to create a docker image for the worker. Run `b start-worker` to start the created image, and `b stop-worker` to stop it.
-
 
 ### Interactive container command
 
@@ -17,4 +16,18 @@ MSYS_NO_PATHCONV=1 docker run -it \
     -e LIBRARY_PATH=/media \
     -e STAGE="prod" \
     media-worker-prod bash
+```
+
+### One-line install command
+
+PROD:
+
+```
+curl -sSL https://github.com/anuvgupta/media-library-source-worker/blob/main/install.py | python3
+```
+
+DEV:
+
+```
+curl -sSL https://github.com/anuvgupta/media-library-source-worker/blob/main/install.py | python3 - --dev
 ```
