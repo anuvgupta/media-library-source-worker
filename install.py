@@ -218,6 +218,16 @@ def run_setup_scripts(repo_path, is_dev):
         sys.exit(1)
 
     print("\n" + "=" * 60)
+    print("Running stop-worker.sh...")
+    print("=" * 60)
+    process = subprocess.Popen(
+        "bash ./stop-worker.sh", cwd=repo_path, shell=True, env=env
+    )
+    process.wait()
+    if process.returncode != 0:
+        print("WARNING: stop-worker.sh failed (worker may not have been running)")
+
+    print("\n" + "=" * 60)
     print("Running setup-worker.sh...")
     print("=" * 60)
     process = subprocess.Popen(
@@ -227,16 +237,6 @@ def run_setup_scripts(repo_path, is_dev):
     if process.returncode != 0:
         print("ERROR: setup-worker.sh failed")
         sys.exit(1)
-
-    print("\n" + "=" * 60)
-    print("Running stop-worker.sh...")
-    print("=" * 60)
-    process = subprocess.Popen(
-        "bash ./stop-worker.sh", cwd=repo_path, shell=True, env=env
-    )
-    process.wait()
-    if process.returncode != 0:
-        print("WARNING: stop-worker.sh failed (worker may not have been running)")
 
     print("\n" + "=" * 60)
     print("Running start-worker.sh...")
@@ -295,13 +295,6 @@ def main():
     print(f"Library path: {library_path}")
     print(f"Movie collection: {movie_path}")
     print(f"TV collection: {tv_path}")
-
-    print("")
-    print("")
-
-    print(
-        'Please log in at https://streamy.sh and click "Refresh Index" to scan your library.'
-    )
 
 
 if __name__ == "__main__":
