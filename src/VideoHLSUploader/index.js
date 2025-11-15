@@ -750,9 +750,7 @@ class VideoHLSUploader {
                                         mediaType,
                                         percentage,
                                         "reencoding",
-                                        `Encoding ${
-                                            this.mediaType
-                                        }: ${Math.floor(
+                                        `Encoding ${mediaType}: ${Math.floor(
                                             progress
                                         )}% (${speedStr})`,
                                         etaISO
