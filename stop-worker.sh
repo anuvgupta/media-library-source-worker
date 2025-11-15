@@ -7,6 +7,7 @@ STAGE_ENV="${STAGE:-prod}"
 CONTAINER_NAME="media-worker-$STAGE_ENV"
 
 echo "🛑 Stopping media worker..."
+echo "Stopping container $CONTAINER_NAME"
 
 if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     docker stop $CONTAINER_NAME

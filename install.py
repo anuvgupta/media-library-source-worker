@@ -296,6 +296,15 @@ def main():
     print(f"Movie collection: {movie_path}")
     print(f"TV collection: {tv_path}")
 
+    print("")
+    print("")
+
+    print(
+        "Streamy is installed! Please visit https://streamy.sh and sign in, then click Refresh Index to scan your library."
+    )
+
+    print("")
+
 
 if __name__ == "__main__":
     main()
