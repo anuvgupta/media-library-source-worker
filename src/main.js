@@ -2400,7 +2400,7 @@ class MediaWorker {
 
         try {
             const ownerIdentityId = this.getIdentityId();
-            const apiEndpoint = `libraries/${ownerIdentityId}/media/${mediaId}/status`;
+            const apiEndpoint = `libraries/${ownerIdentityId}/media/type/${mediaType}/id/${mediaId}/status`;
 
             const requestBody = {
                 percentage,
