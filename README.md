@@ -23,11 +23,11 @@ MSYS_NO_PATHCONV=1 docker run -it \
 PROD:
 
 ```
-curl -sSL https://github.com/anuvgupta/media-library-source-worker/blob/main/install.py | python3
+curl -sSL https://raw.githubusercontent.com/anuvgupta/media-library-source-worker/refs/heads/main/install.py -o install_streamy.py && python3 install_streamy.py
 ```
 
 DEV:
 
 ```
-curl -sSL https://github.com/anuvgupta/media-library-source-worker/blob/main/install.py | python3 - --dev
+curl -sSL https://raw.githubusercontent.com/anuvgupta/media-library-source-worker/refs/heads/main/install.py -o install_streamy.py && python3 install_streamy.py --dev
 ```
