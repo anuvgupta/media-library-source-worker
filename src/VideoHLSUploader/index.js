@@ -50,6 +50,7 @@ class VideoHLSUploader {
         this.skipExistingSegments = options.skipExistingSegments !== false; // Default to true
         this.existingSegments = new Set(); // Track which segments already exist
         this.playlistFilesExist = false;
+        this.mediaType = null; // Will be set during upload
         // this.testFiles = options.testFiles || [
         //     "./tst/test-movie.mp4",
         //     "./tst/test-movie.mkv",
@@ -63,11 +64,12 @@ class VideoHLSUploader {
         }
     }
 
-    async uploadMovie(filePath, movieId, uploadSubpath) {
+    async uploadMedia(filePath, mediaId, mediaType, uploadSubpath) {
         try {
             this.uploadSubpath = uploadSubpath;
+            this.mediaType = mediaType;
             console.log(
-                `Starting HLS conversion and upload for movie: ${movieId}`
+                `Starting HLS conversion and upload for ${mediaType}: ${mediaId}`
             );
             console.log(`File: ${filePath}`);
 
@@ -88,7 +90,8 @@ class VideoHLSUploader {
 
             // Check for existing segments BEFORE conversion
             this.existingSegments = await this.checkExistingSegments(
-                movieId,
+                mediaId,
+                mediaType,
                 uploadSubpath
             );
 
@@ -100,7 +103,8 @@ class VideoHLSUploader {
 
             // Create upload session
             const uploadSession = {
-                movieId,
+                mediaId,
+                mediaType,
                 totalSegments: 0,
                 uploadedSegments: this.existingSegments.size, // Start with existing segments
                 skippedSegments: this.existingSegments.size,
@@ -110,7 +114,7 @@ class VideoHLSUploader {
                 videoInfo,
             };
 
-            const outputDir = path.join(this.tempDir, movieId);
+            const outputDir = path.join(this.tempDir, mediaId);
             const playlistPath = path.join(outputDir, "playlist.m3u8");
             const segmentInfoPath = path.join(outputDir, "segment-info.json");
 
@@ -157,7 +161,7 @@ class VideoHLSUploader {
             if (!skipConversion) {
                 segmentInfo = await this.convertToHLS(
                     filePath,
-                    movieId,
+                    mediaId,
                     videoInfo
                 );
                 uploadSession.totalSegments = segmentInfo.totalSegments;
@@ -177,31 +181,35 @@ class VideoHLSUploader {
 
             // Check if playlist files exist in S3
             this.playlistFilesExist = await this.checkPlaylistFilesExist(
-                movieId
+                mediaId,
+                mediaType
             );
 
             // Step 2: Upload priority segments first
             await this.uploadPrioritySegments(
-                movieId,
+                mediaId,
                 uploadSession,
                 segmentInfo
             );
 
             // Step 3: Upload remaining segments
             await this.uploadRemainingSegments(
-                movieId,
+                mediaId,
                 uploadSession,
                 segmentInfo
             );
 
             // Cleanup temp files
-            await this.cleanup(movieId);
+            await this.cleanup(mediaId);
 
-            console.log(`✅ Upload completed for movie: ${movieId}`);
+            console.log(`✅ Upload completed for ${mediaType}: ${mediaId}`);
             return uploadSession;
         } catch (error) {
-            console.error(`❌ Upload failed for movie: ${movieId}`, error);
-            await this.cleanup(movieId);
+            console.error(
+                `❌ Upload failed for ${mediaType}: ${mediaId}`,
+                error
+            );
+            await this.cleanup(mediaId);
             throw error;
         }
     }
@@ -474,18 +482,18 @@ class VideoHLSUploader {
         return firstAudioStream;
     }
 
-    async convertToHLS(filePath, movieId, videoInfo) {
+    async convertToHLS(filePath, mediaId, videoInfo) {
         console.log(`🔄 Converting to HLS segments...`);
 
         // Update status: Starting conversion
-        await this.updateMovieStatus(
-            movieId,
+        await this.updateMediaStatus(
+            mediaId,
             1,
             "reencoding",
             "Starting video conversion"
         );
 
-        const outputDir = path.join(this.tempDir, movieId);
+        const outputDir = path.join(this.tempDir, mediaId);
         if (!fs.existsSync(outputDir)) {
             fs.mkdirSync(outputDir, { recursive: true });
         }
@@ -735,11 +743,13 @@ class VideoHLSUploader {
                                                   Date.now() + eta * 1000
                                               ).toISOString()
                                             : null;
-                                    this.updateMovieStatus(
-                                        movieId,
+                                    this.updateMediaStatus(
+                                        mediaId,
                                         percentage,
                                         "reencoding",
-                                        `Encoding movie: ${Math.floor(
+                                        `Encoding ${
+                                            this.mediaType
+                                        }: ${Math.floor(
                                             progress
                                         )}% (${speedStr})`,
                                         etaISO
@@ -763,8 +773,8 @@ class VideoHLSUploader {
 
                 try {
                     // Update status: Conversion completed
-                    await this.updateMovieStatus(
-                        movieId,
+                    await this.updateMediaStatus(
+                        mediaId,
                         29,
                         "converting_hls",
                         "Preparing stream"
@@ -787,7 +797,8 @@ class VideoHLSUploader {
                         playlistPath,
                         segmentFiles: segmentFiles.sort(),
                         convertedAt: new Date().toISOString(),
-                        movieId: movieId,
+                        mediaId: mediaId,
+                        mediaType: this.mediaType,
                     };
 
                     // Save segment info for future reuse
@@ -808,7 +819,7 @@ class VideoHLSUploader {
                         );
                         const extractedSubtitles = await this.extractSubtitles(
                             filePath,
-                            movieId,
+                            mediaId,
                             videoInfo.subtitles,
                             outputDir
                         );
@@ -822,7 +833,7 @@ class VideoHLSUploader {
                                 `🔍 No English subtitles found in video, searching Podnapisi...`
                             );
                             await this.searchAndDownloadPodnapisiSubtitles(
-                                movieId,
+                                mediaId,
                                 outputDir
                             );
                         }
@@ -831,7 +842,7 @@ class VideoHLSUploader {
                             `🔍 No embedded subtitles found, searching Podnapisi...`
                         );
                         await this.searchAndDownloadPodnapisiSubtitles(
-                            movieId,
+                            mediaId,
                             outputDir
                         );
                     }
@@ -852,14 +863,14 @@ class VideoHLSUploader {
         });
     }
 
-    async uploadPrioritySegments(movieId, uploadSession, segmentInfo) {
+    async uploadPrioritySegments(mediaId, uploadSession, segmentInfo) {
         console.log(
             `🚀 Uploading priority segments (first ${this.prioritySegments})...`
         );
 
         // Update status: Starting upload
-        await this.updateMovieStatus(
-            movieId,
+        await this.updateMediaStatus(
+            mediaId,
             30,
             "uploading",
             "Streaming preview"
@@ -880,7 +891,7 @@ class VideoHLSUploader {
 
         const priorityPromises = priorityFiles.map((filename, index) =>
             this.uploadSegment(
-                movieId,
+                mediaId,
                 filename,
                 index,
                 uploadSession,
@@ -894,7 +905,7 @@ class VideoHLSUploader {
         if (actualPriorityUploads > 0 || !this.playlistFilesExist) {
             // Upload initial playlist for priority segments
             await this.uploadPartialPlaylist(
-                movieId,
+                mediaId,
                 priorityFiles.length,
                 segmentInfo
             );
@@ -920,7 +931,7 @@ class VideoHLSUploader {
                 `🔤 Uploading subtitle files for immediate playback...`
             );
             try {
-                await this.uploadSubtitles(movieId, segmentInfo);
+                await this.uploadSubtitles(mediaId, segmentInfo);
                 console.log(`✅ Subtitles ready for playback!`);
             } catch (error) {
                 console.warn(
@@ -936,8 +947,8 @@ class VideoHLSUploader {
         );
 
         // Update status: Priority segments done
-        await this.updateMovieStatus(
-            movieId,
+        await this.updateMediaStatus(
+            mediaId,
             40,
             "uploading",
             // "Stream preview ready with subtitles"
@@ -945,10 +956,10 @@ class VideoHLSUploader {
         );
 
         uploadSession.status = "ready_for_playback";
-        await this.updateUploadStatus(movieId, uploadSession);
+        await this.updateUploadStatus(mediaId, uploadSession);
     }
 
-    async uploadRemainingSegments(movieId, uploadSession, segmentInfo) {
+    async uploadRemainingSegments(mediaId, uploadSession, segmentInfo) {
         console.log(`📤 Uploading remaining segments...`);
 
         const remainingFiles = segmentInfo.segmentFiles.slice(
@@ -957,7 +968,7 @@ class VideoHLSUploader {
 
         // Upload remaining segments with concurrency control
         await this.uploadSegmentsWithConcurrency(
-            movieId,
+            mediaId,
             remainingFiles,
             this.prioritySegments,
             uploadSession,
@@ -969,10 +980,10 @@ class VideoHLSUploader {
         // No subtitle upload needed here anymore
 
         uploadSession.status = "completed";
-        await this.updateUploadStatus(movieId, uploadSession);
+        await this.updateUploadStatus(mediaId, uploadSession);
     }
 
-    async uploadSubtitles(movieId, segmentInfo) {
+    async uploadSubtitles(mediaId, segmentInfo) {
         const subtitleDir = path.join(segmentInfo.outputDir);
         const subtitleFiles = fs
             .readdirSync(subtitleDir)
@@ -990,7 +1001,7 @@ class VideoHLSUploader {
                 const filePath = path.join(subtitleDir, filename);
                 const fileContent = fs.readFileSync(filePath);
 
-                const key = `${this.mediaUploadPath}/${this.uploadSubpath}/movie/${movieId}/subtitles/${filename}`;
+                const key = `${this.mediaUploadPath}/${this.uploadSubpath}/media/${mediaId}/type-${this.mediaType}/subtitles/${filename}`;
 
                 const uploadParams = {
                     Bucket: this.mediaBucketName,
@@ -999,7 +1010,8 @@ class VideoHLSUploader {
                     ContentType: "text/vtt",
                     CacheControl: "public, max-age=31536000",
                     Metadata: {
-                        movieId: movieId,
+                        mediaId: mediaId,
+                        mediaType: this.mediaType,
                         subtitleTrack: "true",
                     },
                 };
@@ -1046,7 +1058,7 @@ class VideoHLSUploader {
     }
 
     async uploadSegmentsWithConcurrency(
-        movieId,
+        mediaId,
         segmentFiles,
         startIndex,
         uploadSession,
@@ -1081,7 +1093,7 @@ class VideoHLSUploader {
                 }
 
                 return this.uploadSegment(
-                    movieId,
+                    mediaId,
                     filename,
                     segmentIndex,
                     uploadSession,
@@ -1104,11 +1116,11 @@ class VideoHLSUploader {
             const now = Date.now();
             if (now - lastStatusUpdate > 15000) {
                 const percentage = Math.min(40 + currentProgress * 55, 95); // 40-95% for remaining upload
-                this.updateMovieStatus(
-                    movieId,
+                this.updateMediaStatus(
+                    mediaId,
                     percentage,
                     "uploading",
-                    `Streaming rest of movie: ${Math.floor(
+                    `Streaming rest of ${this.mediaType}: ${Math.floor(
                         100 * currentProgress
                     )}%`
                 );
@@ -1142,7 +1154,7 @@ class VideoHLSUploader {
 
             if (shouldUpdatePlaylist) {
                 await this.uploadPartialPlaylist(
-                    movieId,
+                    mediaId,
                     uploadedCount,
                     segmentInfo
                 );
@@ -1161,8 +1173,8 @@ class VideoHLSUploader {
         }
 
         // Final status update: Upload completed (this will be 100%)
-        await this.updateMovieStatus(
-            movieId,
+        await this.updateMediaStatus(
+            mediaId,
             100,
             "completed",
             "All processing completed"
@@ -1273,27 +1285,27 @@ class VideoHLSUploader {
         }
     }
 
-    async searchAndDownloadPodnapisiSubtitles(movieId, outputDir) {
+    async searchAndDownloadPodnapisiSubtitles(mediaId, outputDir) {
         try {
-            // Extract movie title and year from movieId (base64 encoded path)
-            const moviePath = base64ToUtf8(movieId);
-            const pathParts = moviePath.split("/");
-            const movieFolderName = pathParts[pathParts.length - 2]; // Get movie folder name
-            const titleMatch = movieFolderName.match(/^(.+?)\s*\((\d{4})\)$/);
+            // Extract movie/show title and year from mediaId (base64 encoded path)
+            const mediaPath = base64ToUtf8(mediaId);
+            const pathParts = mediaPath.split("/");
+            const contentFolderName = pathParts[pathParts.length - 2]; // Get content folder name
+            const titleMatch = contentFolderName.match(/^(.+?)\s*\((\d{4})\)$/);
 
-            const movieTitle = titleMatch
+            const contentTitle = titleMatch
                 ? titleMatch[1].trim()
-                : movieFolderName;
+                : contentFolderName;
             const year = titleMatch ? titleMatch[2] : null;
 
             const subtitles = await this.searchPodnapisiSubtitles(
-                movieTitle,
+                contentTitle,
                 year
             );
 
             if (subtitles.length === 0) {
                 console.log(
-                    `ℹ️ No English subtitles found on Podnapisi for: ${movieTitle}`
+                    `ℹ️ No English subtitles found on Podnapisi for: ${contentTitle}`
                 );
                 return;
             }
@@ -1507,66 +1519,8 @@ class VideoHLSUploader {
         return vttContent;
     }
 
-    async searchAndDownloadPodnapisiSubtitles(movieId, outputDir) {
-        try {
-            // Extract movie title and year from movieId (base64 encoded path)
-            const moviePath = base64ToUtf8(movieId);
-            const pathParts = moviePath.split("/");
-            const movieFolderName = pathParts[pathParts.length - 2]; // Get movie folder name
-            const titleMatch = movieFolderName.match(/^(.+?)\s*\((\d{4})\)$/);
-
-            const movieTitle = titleMatch
-                ? titleMatch[1].trim()
-                : movieFolderName;
-            const year = titleMatch ? titleMatch[2] : null;
-
-            const subtitles = await this.searchPodnapisiSubtitles(
-                movieTitle,
-                year
-            );
-
-            if (subtitles.length === 0) {
-                console.log(
-                    `ℹ️ No English subtitles found on Podnapisi for: ${movieTitle}`
-                );
-                return;
-            }
-
-            console.log(
-                `📥 Downloading ${subtitles.length} subtitles from Podnapisi...`
-            );
-
-            let downloadCount = 0;
-            for (let i = 0; i < subtitles.length; i++) {
-                const subtitle = subtitles[i];
-                const outputFilename = `subtitle_eng_podnapisi_${i}.vtt`;
-                const outputPath = path.join(outputDir, outputFilename);
-
-                const success = await this.downloadPodnapisiSubtitle(
-                    subtitle.download,
-                    outputPath,
-                    i
-                );
-                if (success) {
-                    downloadCount++;
-                    console.log(`✅ Downloaded: ${outputFilename}`);
-                }
-            }
-
-            if (downloadCount > 0) {
-                console.log(
-                    `🎉 Successfully downloaded ${downloadCount} subtitles from Podnapisi`
-                );
-            }
-        } catch (error) {
-            console.warn(
-                `⚠️ Podnapisi subtitle download failed: ${error.message}`
-            );
-        }
-    }
-
     async uploadSegment(
-        movieId,
+        mediaId,
         filename,
         segmentIndex,
         uploadSession,
@@ -1597,7 +1551,7 @@ class VideoHLSUploader {
             const segmentPath = path.join(outputDir, filename);
             const segmentBuffer = fs.readFileSync(segmentPath);
 
-            const key = `${this.mediaUploadPath}/${this.uploadSubpath}/movie/${movieId}/segments/${filename}`;
+            const key = `${this.mediaUploadPath}/${this.uploadSubpath}/media/${mediaId}/type-${this.mediaType}/segments/${filename}`;
 
             const uploadParams = {
                 Bucket: this.mediaBucketName,
@@ -1606,7 +1560,8 @@ class VideoHLSUploader {
                 ContentType: "video/mp2t", // MPEG-2 Transport Stream
                 CacheControl: "public, max-age=31536000", // Cache segments for 1 year (they never change)
                 Metadata: {
-                    movieId: movieId,
+                    mediaId: mediaId,
+                    mediaType: this.mediaType,
                     segmentIndex: segmentIndex.toString(),
                     totalSegments: uploadSession.totalSegments.toString(),
                 },
@@ -1633,7 +1588,7 @@ class VideoHLSUploader {
 
             // Update progress periodically
             if (uploadSession.uploadedSegments % 3 === 0) {
-                await this.updateUploadStatus(movieId, uploadSession);
+                await this.updateUploadStatus(mediaId, uploadSession);
             }
         } catch (error) {
             console.error(`❌ Failed to upload segment ${filename}:`, error);
@@ -1642,7 +1597,7 @@ class VideoHLSUploader {
     }
 
     async uploadPartialPlaylist(
-        movieId,
+        mediaId,
         segmentCount,
         segmentInfo,
         presignedUrls
@@ -1670,7 +1625,7 @@ class VideoHLSUploader {
         ) {
             const templateParams = {
                 Bucket: this.playlistBucketName,
-                Key: `${this.playlistUploadPath}/${this.uploadSubpath}/movie/${movieId}/playlist-template.m3u8`,
+                Key: `${this.playlistUploadPath}/${this.uploadSubpath}/media/${mediaId}/type-${this.mediaType}/playlist-template.m3u8`,
                 Body: templatePlaylist,
                 ContentType: "application/vnd.apple.mpegurl",
             };
@@ -1686,25 +1641,26 @@ class VideoHLSUploader {
 
         // Call API to process template into real playlist
         await this.processPlaylistViaAPI(
-            movieId,
+            mediaId,
             segmentCount,
             segmentInfo.totalSegments
         );
     }
 
-    async processPlaylistViaAPI(movieId, segmentCount, totalSegments) {
+    async processPlaylistViaAPI(mediaId, segmentCount, totalSegments) {
         try {
             console.log(
                 `🔄 Processing playlist via API (${segmentCount}/${totalSegments} segments)`
             );
 
             const isComplete = segmentCount >= totalSegments;
-            const apiEndpoint = `libraries/${this.uploadSubpath}/movies/${movieId}/playlist/process`;
+            const apiEndpoint = `libraries/${this.uploadSubpath}/media/${mediaId}/playlist/process`;
 
             const requestBody = {
                 segmentCount,
                 totalSegments,
                 isComplete,
+                mediaType: this.mediaType,
             };
 
             const response = await this.makeAuthenticatedAPIRequest(
@@ -1729,7 +1685,7 @@ class VideoHLSUploader {
         }
     }
 
-    async updateUploadStatus(movieId, uploadSession) {
+    async updateUploadStatus(mediaId, uploadSession) {
         const actualUploaded =
             uploadSession.uploadedSegments - uploadSession.skippedSegments;
         const progress = (
@@ -1741,12 +1697,12 @@ class VideoHLSUploader {
         );
 
         console.log(
-            `📊 Status Update - Movie: ${movieId}, Progress: ${progress}%, Uploaded: ${actualUploaded}, Skipped: ${uploadSession.skippedSegments}, Elapsed: ${elapsed}s, Status: ${uploadSession.status}`
+            `📊 Status Update - Media: ${mediaId}, Type: ${uploadSession.mediaType}, Progress: ${progress}%, Uploaded: ${actualUploaded}, Skipped: ${uploadSession.skippedSegments}, Elapsed: ${elapsed}s, Status: ${uploadSession.status}`
         );
     }
 
     // Add method to check existing segments
-    async checkExistingSegments(movieId, uploadSubpath) {
+    async checkExistingSegments(mediaId, mediaType, uploadSubpath) {
         if (!this.skipExistingSegments) {
             console.log(
                 "⏭️  Segment upload skipping disabled, will upload all segments"
@@ -1759,8 +1715,8 @@ class VideoHLSUploader {
 
             const listParams = {
                 Bucket: this.mediaBucketName,
-                Prefix: `${this.mediaUploadPath}/${uploadSubpath}/movie/${movieId}/segments/`,
-                MaxKeys: 3000, // Should be enough for most movies
+                Prefix: `${this.mediaUploadPath}/${uploadSubpath}/media/${mediaId}/type-${mediaType}/segments/`,
+                MaxKeys: 3000, // Should be enough for most content
             };
 
             const listResult = await this.s3Client.send(
@@ -1809,12 +1765,12 @@ class VideoHLSUploader {
         }
     }
 
-    async checkPlaylistFilesExist(movieId) {
+    async checkPlaylistFilesExist(mediaId, mediaType) {
         try {
             console.log("🔍 Checking if playlist files exist...");
 
-            const templateKey = `${this.playlistUploadPath}/${this.uploadSubpath}/movie/${movieId}/playlist-template.m3u8`;
-            const playlistKey = `${this.playlistUploadPath}/${this.uploadSubpath}/movie/${movieId}/playlist.m3u8`;
+            const templateKey = `${this.playlistUploadPath}/${this.uploadSubpath}/media/${mediaId}/type-${mediaType}/playlist-template.m3u8`;
+            const playlistKey = `${this.playlistUploadPath}/${this.uploadSubpath}/media/${mediaId}/type-${mediaType}/playlist.m3u8`;
 
             // Check template file
             const templateExists = await this.checkS3ObjectExists(
@@ -1876,8 +1832,8 @@ class VideoHLSUploader {
         }
     }
 
-    async updateMovieStatus(
-        movieId,
+    async updateMediaStatus(
+        mediaId,
         percentage,
         stageName,
         message = null,
@@ -1888,8 +1844,14 @@ class VideoHLSUploader {
         }
 
         try {
-            const apiEndpoint = `libraries/${this.uploadSubpath}/movies/${movieId}/status`;
-            const requestBody = { percentage, stageName, message, eta };
+            const apiEndpoint = `libraries/${this.uploadSubpath}/media/${mediaId}/status`;
+            const requestBody = {
+                percentage,
+                stageName,
+                message,
+                mediaType: this.mediaType,
+                eta,
+            };
 
             console.log("STATUS UPDATE:", requestBody);
 
@@ -1899,23 +1861,23 @@ class VideoHLSUploader {
                 requestBody
             );
         } catch (error) {
-            console.warn("Failed to update movie status:", error.message);
+            console.warn("Failed to update media status:", error.message);
         }
     }
 
-    async cleanup(movieId) {
+    async cleanup(mediaId) {
         try {
-            const outputDir = path.join(this.tempDir, movieId);
+            const outputDir = path.join(this.tempDir, mediaId);
             if (fs.existsSync(outputDir)) {
                 const files = fs.readdirSync(outputDir);
                 for (const file of files) {
                     fs.unlinkSync(path.join(outputDir, file));
                 }
                 fs.rmdirSync(outputDir);
-                console.log(`🧹 Cleaned up temp files for: ${movieId}`);
+                console.log(`🧹 Cleaned up temp files for: ${mediaId}`);
             }
         } catch (error) {
-            console.warn(`⚠️ Cleanup failed for ${movieId}:`, error.message);
+            console.warn(`⚠️ Cleanup failed for ${mediaId}:`, error.message);
         }
     }
 }

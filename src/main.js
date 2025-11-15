@@ -202,9 +202,9 @@ class MediaWorker {
                     await this.handleRefreshLibrary(body);
                     break;
 
-                case "upload-movie":
-                    // Handle upload-movie asynchronously
-                    await this.queueUploadMovie(body, message);
+                case "upload-media":
+                    // Handle upload-media asynchronously
+                    await this.queueUploadMedia(body, message);
                     return; // Don't delete message yet - will be deleted after upload
 
                 default:
@@ -499,24 +499,31 @@ class MediaWorker {
         }
     }
 
-    async handleUploadMovie(messageBody) {
-        console.log("🎬 Handling upload-movie command");
-        const movieId = messageBody.movieId;
+    async handleUploadMedia(messageBody) {
+        console.log("🎬 Handling upload-media command");
+        const mediaId = messageBody.mediaId;
+        const mediaType = messageBody.mediaType;
 
-        if (!movieId) {
-            throw new Error("movieId is required for upload-movie command");
+        if (!mediaId) {
+            throw new Error("mediaId is required for upload-media command");
+        }
+
+        if (!mediaType || !["movie", "episode"].includes(mediaType)) {
+            throw new Error(
+                "mediaType is required and must be 'movie' or 'episode' for upload-media command"
+            );
         }
 
         // Check if upload is already in progress
-        if (this.activeUploads.has(movieId)) {
+        if (this.activeUploads.has(mediaId)) {
             console.log(
-                `🔄 Upload already in progress for content: ${movieId}, discarding duplicate request`
+                `🔄 Upload already in progress for content: ${mediaId}, discarding duplicate request`
             );
-            return { status: "duplicate_request_discarded", movieId };
+            return { status: "duplicate_request_discarded", mediaId };
         }
 
         const libraryPath = LIBRARY_PATH; // Use from config/env
-        const contentPathInLibrary = base64ToUtf8(messageBody.movieId);
+        const contentPathInLibrary = base64ToUtf8(messageBody.mediaId);
         const contentPath = path.join(libraryPath, contentPathInLibrary);
 
         // Determine content type from path
@@ -529,18 +536,23 @@ class MediaWorker {
 
         try {
             // Mark upload as active
-            this.activeUploads.set(movieId, {
+            this.activeUploads.set(mediaId, {
                 status: "starting",
                 startTime: Date.now(),
                 contentPath: contentPath,
                 contentType: contentType,
                 contentName: contentName,
+                mediaType: mediaType,
             });
 
             console.log(
                 `🚀 Starting upload for ${contentType}: ${contentName}`
             );
-            const uploadResult = await this.uploadMedia(contentPath, movieId);
+            const uploadResult = await this.uploadMedia(
+                contentPath,
+                mediaId,
+                mediaType
+            );
 
             console.log(`✅ ${contentType} upload completed: ${contentName}`);
             return uploadResult;
@@ -552,7 +564,7 @@ class MediaWorker {
             throw error;
         } finally {
             // Always clean up the active upload tracking
-            this.activeUploads.delete(movieId);
+            this.activeUploads.delete(mediaId);
         }
     }
 
@@ -627,36 +639,43 @@ class MediaWorker {
     }
 
     // Updated async upload handler
-    async handleUploadMovieAsync(movieId, messageBody, message) {
+    async handleUploadMediaAsync(mediaId, messageBody, message) {
         try {
-            const uploadInfo = this.activeUploads.get(movieId);
+            const uploadInfo = this.activeUploads.get(mediaId);
             const contentType = uploadInfo?.contentType || "Content";
-            const contentName = uploadInfo?.contentName || movieId;
+            const contentName = uploadInfo?.contentName || mediaId;
+            const mediaType = uploadInfo?.mediaType || messageBody.mediaType;
 
             // Update status: Processing started
-            await this.updateMovieUploadStatus(
-                movieId,
+            await this.updateMediaUploadStatus(
+                mediaId,
                 0,
                 "starting",
-                `${contentType} processing started`
+                `${contentType} processing started`,
+                mediaType
             );
 
             const libraryPath = LIBRARY_PATH;
-            const contentPathInLibrary = base64ToUtf8(messageBody.movieId);
+            const contentPathInLibrary = base64ToUtf8(messageBody.mediaId);
             const contentPath = path.join(libraryPath, contentPathInLibrary);
 
             if (!fs.existsSync(contentPath)) {
                 throw new Error(`Content file not found: ${contentPath}`);
             }
 
-            const uploadResult = await this.uploadMedia(contentPath, movieId);
+            const uploadResult = await this.uploadMedia(
+                contentPath,
+                mediaId,
+                mediaType
+            );
 
             // Update status: Processing completed
-            await this.updateMovieUploadStatus(
-                movieId,
+            await this.updateMediaUploadStatus(
+                mediaId,
                 100,
                 "completed",
-                `${contentType} processing completed`
+                `${contentType} processing completed`,
+                mediaType
             );
 
             // Delete SQS message after successful upload
@@ -667,19 +686,21 @@ class MediaWorker {
 
             return uploadResult;
         } catch (error) {
-            const uploadInfo = this.activeUploads.get(movieId);
+            const uploadInfo = this.activeUploads.get(mediaId);
             const contentType = uploadInfo?.contentType || "Content";
+            const mediaType = uploadInfo?.mediaType || messageBody.mediaType;
 
             // Update status: Processing failed
-            await this.updateMovieUploadStatus(
-                movieId,
+            await this.updateMediaUploadStatus(
+                mediaId,
                 0,
                 "failed",
-                `${contentType} processing failed: ${error.message}`
+                `${contentType} processing failed: ${error.message}`,
+                mediaType
             );
 
             console.error(
-                `❌ Upload failed for ${contentType}: ${movieId}`,
+                `❌ Upload failed for ${contentType}: ${mediaId}`,
                 error
             );
             // Don't delete message on failure - let it retry
@@ -2073,13 +2094,19 @@ class MediaWorker {
     }
 
     // Upload media file with HLS conversion for videos
-    async uploadMedia(filePath, fileId) {
+    async uploadMedia(filePath, fileId, mediaType) {
         if (!this.credentials?.identityId) {
             throw new Error("Not authenticated");
         }
 
         if (!fs.existsSync(filePath)) {
             throw new Error(`File not found: ${filePath}`);
+        }
+
+        if (!mediaType || !["movie", "episode"].includes(mediaType)) {
+            throw new Error(
+                "mediaType is required and must be 'movie' or 'episode'"
+            );
         }
 
         // Check if it's a video file that should use HLS
@@ -2095,9 +2122,10 @@ class MediaWorker {
             const fileName = path.basename(filePath, path.extname(filePath));
 
             try {
-                const uploadSession = await this.hlsUploader.uploadMovie(
+                const uploadSession = await this.hlsUploader.uploadMedia(
                     filePath,
                     fileId,
+                    mediaType,
                     uploadSubpath
                 );
                 console.log(`✅ HLS upload completed for file: ${fileId}`);
@@ -2137,24 +2165,24 @@ class MediaWorker {
     }
 
     // New method to queue and manage concurrent uploads
-    async queueUploadMovie(messageBody, message) {
-        const movieId = messageBody.movieId;
+    async queueUploadMedia(messageBody, message) {
+        const mediaId = messageBody.mediaId;
 
-        if (!movieId) {
-            throw new Error("movieId is required for upload-movie command");
+        if (!mediaId) {
+            throw new Error("mediaId is required for upload-media command");
         }
 
         // Check if upload is already in progress or queued
-        if (this.activeUploads.has(movieId)) {
+        if (this.activeUploads.has(mediaId)) {
             console.log(
-                `🔄 Upload already in progress for movie: ${movieId}, discarding duplicate request`
+                `🔄 Upload already in progress for media: ${mediaId}, discarding duplicate request`
             );
             await this.deleteMessage(message.ReceiptHandle);
             return;
         }
 
         // Add to active uploads tracking
-        this.activeUploads.set(movieId, {
+        this.activeUploads.set(mediaId, {
             status: "queued",
             queueTime: Date.now(),
             messageBody,
@@ -2163,28 +2191,28 @@ class MediaWorker {
 
         // If we're under the concurrency limit, start immediately
         if (this.processingUploads < this.maxConcurrentUploads) {
-            this.startUpload(movieId);
+            this.startUpload(mediaId);
         } else {
             // Add to queue
-            this.uploadQueue.push(movieId);
+            this.uploadQueue.push(mediaId);
             console.log(
-                `📋 Movie ${movieId} queued for upload (${this.uploadQueue.length} in queue)`
+                `📋 Media ${mediaId} queued for upload (${this.uploadQueue.length} in queue)`
             );
         }
     }
 
     // New method to start an upload
-    async startUpload(movieId) {
-        if (!this.activeUploads.has(movieId)) {
-            console.error(`❌ Movie ${movieId} not found in active uploads`);
+    async startUpload(mediaId) {
+        if (!this.activeUploads.has(mediaId)) {
+            console.error(`❌ Media ${mediaId} not found in active uploads`);
             return;
         }
 
-        const uploadInfo = this.activeUploads.get(movieId);
+        const uploadInfo = this.activeUploads.get(mediaId);
         this.processingUploads++;
 
         console.log(
-            `🚀 Starting upload for movie: ${movieId} (${this.processingUploads}/${this.maxConcurrentUploads} slots used)`
+            `🚀 Starting upload for media: ${mediaId} (${this.processingUploads}/${this.maxConcurrentUploads} slots used)`
         );
 
         try {
@@ -2193,37 +2221,37 @@ class MediaWorker {
             uploadInfo.startTime = Date.now();
 
             // Start the actual upload (don't await - run in background)
-            this.handleUploadMovieAsync(
-                movieId,
+            this.handleUploadMediaAsync(
+                mediaId,
                 uploadInfo.messageBody,
                 uploadInfo.message
             )
                 .then(() => {
-                    console.log(`✅ Upload completed for movie: ${movieId}`);
+                    console.log(`✅ Upload completed for media: ${mediaId}`);
                 })
                 .catch((error) => {
                     console.error(
-                        `❌ Upload failed for movie: ${movieId}`,
+                        `❌ Upload failed for media: ${mediaId}`,
                         error
                     );
                 })
                 .finally(() => {
                     // Cleanup and start next upload
-                    this.finishUpload(movieId);
+                    this.finishUpload(mediaId);
                 });
         } catch (error) {
             console.error(
-                `❌ Failed to start upload for movie: ${movieId}`,
+                `❌ Failed to start upload for media: ${mediaId}`,
                 error
             );
-            this.finishUpload(movieId);
+            this.finishUpload(mediaId);
         }
     }
 
     // New method to clean up after upload completion
-    finishUpload(movieId) {
+    finishUpload(mediaId) {
         // Remove from active uploads
-        this.activeUploads.delete(movieId);
+        this.activeUploads.delete(mediaId);
         this.processingUploads--;
 
         console.log(
@@ -2235,19 +2263,19 @@ class MediaWorker {
             this.uploadQueue.length > 0 &&
             this.processingUploads < this.maxConcurrentUploads
         ) {
-            const nextMovieId = this.uploadQueue.shift();
+            const nextMediaId = this.uploadQueue.shift();
             console.log(
-                `📤 Starting queued upload: ${nextMovieId} (${this.uploadQueue.length} remaining in queue)`
+                `📤 Starting queued upload: ${nextMediaId} (${this.uploadQueue.length} remaining in queue)`
             );
-            this.startUpload(nextMovieId);
+            this.startUpload(nextMediaId);
         }
     }
 
     // New method to get upload status
     getUploadStatus() {
         const activeUploads = Array.from(this.activeUploads.entries()).map(
-            ([movieId, info]) => ({
-                movieId,
+            ([mediaId, info]) => ({
+                mediaId,
                 status: info.status,
                 queueTime: info.queueTime,
                 startTime: info.startTime,
@@ -2289,7 +2317,7 @@ class MediaWorker {
                     ? `${Math.round(upload.duration / 1000)}s`
                     : "N/A";
                 console.log(
-                    `    ${upload.movieId}: ${upload.status} (${duration})`
+                    `    ${upload.mediaId}: ${upload.status} (${duration})`
                 );
             });
         }
@@ -2356,12 +2384,13 @@ class MediaWorker {
         }
     }
 
-    // Method to update movie upload status via API
-    async updateMovieUploadStatus(
-        movieId,
+    // Method to update media upload status via API
+    async updateMediaUploadStatus(
+        mediaId,
         percentage,
         stageName,
         message = null,
+        mediaType,
         eta = null
     ) {
         if (!this.credentials?.identityId) {
@@ -2371,12 +2400,13 @@ class MediaWorker {
 
         try {
             const ownerIdentityId = this.getIdentityId();
-            const apiEndpoint = `libraries/${ownerIdentityId}/movies/${movieId}/status`;
+            const apiEndpoint = `libraries/${ownerIdentityId}/media/${mediaId}/status`;
 
             const requestBody = {
                 percentage,
                 stageName,
                 message,
+                mediaType,
                 eta,
             };
 
@@ -2757,10 +2787,16 @@ async function main() {
                     process.exit(1);
                 }
                 if (!args[2]) {
-                    console.error("Please provide movie id");
+                    console.error("Please provide media id");
                     process.exit(1);
                 }
-                await worker.uploadMedia(args[1], args[2]);
+                if (!args[3]) {
+                    console.error(
+                        "Please provide media type (movie or episode)"
+                    );
+                    process.exit(1);
+                }
+                await worker.uploadMedia(args[1], args[2], args[3]);
                 break;
 
             // case "list-media":
