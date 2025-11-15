@@ -23,5 +23,7 @@
     "concurrentUploads": 8,
     "prioritySegments": 8,
     "maxConcurrentUploads": 5,
-    "libraryPath": "/Users/anuv/Downloads/TEST_DRIVE/Library/Film/Live"
+    "libraryPath": "/Volumes/STREAMY_A/Library",
+    "libraryMoviePath": "Movies",
+    "libraryTvPath": "TV"
 }

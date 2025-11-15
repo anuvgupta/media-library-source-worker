@@ -45,6 +45,25 @@ print_error() {
     echo -e "${RED}❌ $1${NC}"
 }
 
+# Step 0: Clean up old containers and images
+print_step "Cleaning up old Docker resources..."
+
+# Remove old setup container if it exists
+if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    print_warning "Removing existing setup container: $CONTAINER_NAME"
+    docker rm -f $CONTAINER_NAME || true
+    print_success "Old setup container removed"
+fi
+
+# Remove old authenticated image if it exists
+if docker images --format '{{.Repository}}' | grep -q "^${AUTHENTICATED_IMAGE}$"; then
+    print_warning "Removing existing authenticated image: $AUTHENTICATED_IMAGE"
+    docker rmi -f $AUTHENTICATED_IMAGE || true
+    print_success "Old authenticated image removed"
+fi
+
+print_success "Cleanup complete"
+
 # Step 1: Check if config exists
 print_step "Checking configuration..."
 if [ ! -f "$CONFIG_DIR/$STAGE_ENV.json" ]; then
@@ -105,13 +124,7 @@ print_success "Container library path will be: /media"
 # docker build -t $IMAGE_NAME .
 # print_success "Base image built successfully"
 
-# Step 3: Check if we need to clean up existing containers
-if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    print_warning "Removing existing setup container..."
-    docker rm -f $CONTAINER_NAME
-fi
-
-# Step 4: Run interactive setup
+# Step 3: Run interactive setup
 print_step "Starting interactive setup container..."
 echo ""
 echo -e "${YELLOW}Please enter your username and password if prompted.${NC}"
@@ -130,7 +143,7 @@ MSYS_NO_PATHCONV=1 docker run -it \
     -e STAGE="$STAGE_ENV" \
     $IMAGE_NAME bash ./login.sh
 
-# Step 5: Commit the authenticated container
+# Step 4: Commit the authenticated container
 print_step "Creating authenticated image..."
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     docker commit $CONTAINER_NAME $AUTHENTICATED_IMAGE
