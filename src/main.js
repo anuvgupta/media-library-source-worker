@@ -1789,10 +1789,13 @@ class MediaWorker {
         try {
             console.log(`    Processing TV show: ${showName}`);
 
+            let showYear = this.parseContentYear(showName);
+
             const show = {
                 name: showName,
                 seasons: {},
                 path: relativePath,
+                year: showYear,
             };
 
             // Find season directories
