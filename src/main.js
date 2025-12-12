@@ -1656,6 +1656,8 @@ class MediaWorker {
     ) {
         try {
             const movieName = this.parseContentName(movieDirName);
+            let movieYear = this.parseContentYear(movieDirName);
+
             console.log(`    Processing movie: ${movieName}`);
             console.log(`    Movie path: ${moviePath}`);
 
@@ -1719,6 +1721,10 @@ class MediaWorker {
 
             console.log(`      Found video file: ${videoFile}`);
 
+            if (!movieYear || movieYear.trim() == "") {
+                movieYear = this.parseContentYear(videoFile);
+            }
+
             // Get file size
             const stats = fs.statSync(videoFilePath);
             const fileSize = this.formatFileSize(stats.size);
@@ -1761,6 +1767,7 @@ class MediaWorker {
                 quality,
                 videoFile,
                 path: relativePath,
+                year: movieYear,
             };
         } catch (movieError) {
             console.log(
@@ -2013,6 +2020,33 @@ class MediaWorker {
             return match[1].trim();
         }
         return folderName.trim();
+    }
+
+    parseContentYear(folderName) {
+        const currentYear = new Date().getFullYear();
+        const maxYear = currentYear + 3;
+
+        // First try to match year in parentheses: (YYYY)
+        const parenMatch = folderName.match(/\((\d{4})\)/);
+        if (parenMatch) {
+            const year = parseInt(parenMatch[1]);
+            if (year >= 1888 && year <= maxYear) {
+                return parenMatch[1];
+            }
+        }
+
+        // Then try to match year at the end or followed by non-alphanumeric: YYYY
+        const yearMatch = folderName.match(/\b(\d{4})\b/);
+        if (yearMatch) {
+            const year = parseInt(yearMatch[1]);
+            // Validate it's a reasonable movie year (1888 to current year + 3)
+            if (year >= 1888 && year <= maxYear) {
+                return yearMatch[1];
+            }
+        }
+
+        // No year found
+        return "";
     }
 
     // Parse season number from directory name
@@ -2621,9 +2655,13 @@ class MediaWorker {
             const cleanedTitle = this.cleanContentTitleForSearch(content.name);
 
             // Build query
+            // const fullTitle =
+            //     content.contentType === "movie"
+            //         ? `${content.collection} ${cleanedTitle}`
+            //         : cleanedTitle;
             const fullTitle =
-                content.contentType === "movie"
-                    ? `${content.collection} ${cleanedTitle}`
+                content.year && content.year.trim() != ""
+                    ? `${cleanedTitle} y:${content.year}`
                     : cleanedTitle;
 
             // Search TMDB via API Gateway
