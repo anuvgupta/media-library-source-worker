@@ -2618,11 +2618,17 @@ class MediaWorker {
             );
 
             // Clean title for search (use the same logic as frontend)
-            const cleanedTitle = this.cleanMovieTitleForSearch(content.name);
+            const cleanedTitle = this.cleanContentTitleForSearch(content.name);
+
+            // Build query
+            const fullTitle =
+                content.contentType === "movie"
+                    ? `${content.collection} ${cleanedTitle}`
+                    : cleanedTitle;
 
             // Search TMDB via API Gateway
             const queryParams = new URLSearchParams();
-            queryParams.append("query", cleanedTitle);
+            queryParams.append("query", fullTitle);
 
             // For TV shows, use different endpoint or add type parameter
             const endpoint =
@@ -2728,7 +2734,7 @@ class MediaWorker {
         }
     }
 
-    cleanMovieTitleForSearch(title) {
+    cleanContentTitleForSearch(title) {
         if (!title) return title;
 
         let cleanedTitle = title;
