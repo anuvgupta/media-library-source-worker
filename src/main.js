@@ -2655,18 +2655,22 @@ class MediaWorker {
             const cleanedTitle = this.cleanContentTitleForSearch(content.name);
 
             // Build query
-            // const fullTitle =
+            // const searchQuery =
             //     content.contentType === "movie"
             //         ? `${content.collection} ${cleanedTitle}`
             //         : cleanedTitle;
-            const searchQuery =
-                content.year && content.year.trim() != ""
-                    ? `${cleanedTitle}+y:${content.year}`
-                    : cleanedTitle;
+            // const searchQuery =
+            //     content.year && content.year.trim() != ""
+            //         ? `${cleanedTitle}+y:${content.year}`
+            //         : cleanedTitle;
+            const searchQuery = cleanedTitle;
 
             // Search TMDB via API Gateway
             const queryParams = new URLSearchParams();
             queryParams.append("query", searchQuery);
+            if (content.year && content.year.trim() != "") {
+                queryParams.append("year", content.year);
+            }
 
             // For TV shows, use different endpoint or add type parameter
             const endpoint =
